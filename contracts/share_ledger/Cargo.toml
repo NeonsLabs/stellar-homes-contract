@@ -1,0 +1,15 @@
+[package]
+name = "sh-share-ledger"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Per-property cap table: share balances, transfers and rental-income entitlement."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

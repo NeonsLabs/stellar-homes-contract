@@ -1,0 +1,6 @@
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+# wasm32v1-none, not wasm32-unknown-unknown: recent Rust enables wasm features
+# on the latter (reference-types) that the Soroban VM rejects at deploy time.
+targets = ["wasm32v1-none"]

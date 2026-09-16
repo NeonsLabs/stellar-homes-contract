@@ -1,0 +1,17 @@
+[package]
+name = "sh-offering"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Primary share sale: subscription escrow, soft cap, settlement or refund."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+sh-property-registry = { path = "../property_registry" }
+sh-share-ledger = { path = "../share_ledger" }
