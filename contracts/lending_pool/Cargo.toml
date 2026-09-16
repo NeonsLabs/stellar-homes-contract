@@ -1,9 +1,9 @@
 [package]
-name = "sh-offering"
+name = "sh-lending-pool"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Primary share sale: subscription escrow, soft cap, settlement or refund."
+description = "Investor capital for the mortgage pool: deposits, reservations and yield."
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -13,5 +13,3 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
-sh-property-registry = { path = "../property_registry" }
-sh-share-ledger = { path = "../share_ledger" }

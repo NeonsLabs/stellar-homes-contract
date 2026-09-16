@@ -1,16 +1,24 @@
 #![no_std]
-//! PropertyRegistry — what a property is, who speaks for it, and where it is
-//! in its life.
+//! PropertyRegistry — what a property is, who holds it in trust, and how far
+//! the build has got.
 //!
-//! The registry holds no money and issues no shares. It is the one place that
-//! records which sponsor is responsible for a property, what independent
-//! appraisers think it is worth, and whether it is still being offered, owned
-//! by its shareholders, or retired. The Offering contract reads that record
-//! before it takes a cent, and writes back the outcome of the sale.
+//! The registry holds no money and lends nothing. It is the notary: it records
+//! the hash of a title deed and survey, whether a land-registry oracle has
+//! checked that title, what a licensed surveyor valued the property at, and
+//! which construction milestones an inspector has signed off.
 //!
-//! A property cannot reach the market on its sponsor's word alone: an offering
-//! may only open once a registered appraiser has published a valuation, and
-//! the sponsor may not appraise their own property.
+//! Those signatures are what the MortgagePool reads before it releases a
+//! tranche of somebody's money, which is why they live in a contract that
+//! cannot itself move funds. A compromised registry can lie about a building;
+//! it cannot spend against one.
+//!
+//! ## Why the paperwork is only a hash
+//!
+//! A title deed names people and places. Publishing one on a public ledger
+//! would expose the borrower, the seller and the plot to anyone who cared to
+//! look, permanently. The registry stores only a 32-byte digest, so the
+//! documents can be held off-chain, disclosed to the parties who need them,
+//! and still be proved unaltered by anyone holding a copy.
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
@@ -26,10 +34,13 @@ const DAY_IN_LEDGERS: u32 = 17_280;
 const EXTEND_TO: u32 = 120 * DAY_IN_LEDGERS;
 const THRESHOLD: u32 = 90 * DAY_IN_LEDGERS;
 
-/// The largest share count a property may be divided into. Bounded so that
-/// `shares * price_per_share` cannot approach the range of `i128` and so that
-/// the per-share accounting in the ShareLedger keeps its precision.
-const MAX_TOTAL_SHARES: i128 = 1_000_000_000_000;
+/// Construction stages, fixed at five to match the build schedule the platform
+/// underwrites against: foundation, walls, roofing, finishing, handover.
+///
+/// Fixed rather than configurable because a tranche is released per stage. A
+/// property that could declare its own stage count could declare one stage and
+/// draw the whole principal on a poured foundation.
+pub const MILESTONE_COUNT: u32 = 5;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -42,63 +53,72 @@ pub enum Error {
     ActionPending = 6,
     TimelockNotExpired = 7,
     UnknownProperty = 8,
-    InvalidShareCount = 9,
-    InvalidPrice = 10,
-    InvalidValuation = 11,
-    NotSponsor = 12,
-    NotAppraiser = 13,
-    SelfAppraisal = 14,
-    NotAppraised = 15,
-    WrongStatus = 16,
-    OfferingNotSet = 17,
+    NotTrustee = 9,
+    NotOracle = 10,
+    WrongStatus = 11,
+    InvalidValuation = 12,
+    InvalidStage = 13,
+    NoEvidence = 14,
+    AlreadyVerified = 15,
+    OutOfOrder = 16,
+    MortgagePoolNotSet = 17,
 }
 
 /// Where a property sits in its life.
 ///
-/// The only paths are `Draft -> Offering`, and from there either `Owned` when
-/// the sale settles or `Failed` when it does not. A settled property ends at
-/// `Retired` when the building is sold and shareholders are bought out. There
-/// is no route back into `Offering`: a failed raise is re-registered as a new
-/// property, so the cap table of a settled offering can never be reopened.
+/// `Pending -> Verified` is the land-registry check. `Verified -> Mortgaged`
+/// happens when a mortgage against it is funded, and from there it ends at
+/// `Repaid` or `Defaulted`. The names match the backend's property status
+/// exactly, so the two never have to be translated.
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PropertyStatus {
-    /// Registered, not yet on sale.
-    Draft,
-    /// Shares are being sold by the Offering contract.
-    Offering,
-    /// The sale settled; the property belongs to its shareholders.
-    Owned,
-    /// The sale did not reach its soft cap and was unwound.
-    Failed,
-    /// Wound up. No further income is expected.
-    Retired,
+    /// Submitted by a trustee, title not yet checked.
+    Pending,
+    /// The land registry oracle has confirmed the title.
+    Verified,
+    /// A mortgage against this property has been funded.
+    Mortgaged,
+    /// The mortgage was paid off.
+    Repaid,
+    /// The mortgage defaulted.
+    Defaulted,
 }
 
 /// A property as the protocol knows it.
 ///
-/// Nothing here identifies a person or a street address. `document_hash` is the
-/// digest of the off-chain prospectus, deed and title report; the registry
-/// stores only the digest so that the paperwork can be published, mirrored and
-/// verified anywhere without putting it on a public ledger.
+/// `title_hash` digests the deed; `survey_doc_hash` digests the surveyor's
+/// report. Neither document is stored.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Property {
     pub id: u64,
-    pub sponsor: Address,
-    pub document_hash: BytesN<32>,
-    pub total_shares: i128,
-    /// Primary-sale price of one share, in units of the settlement asset.
-    pub price_per_share: i128,
+    /// The party holding the property in trust for the borrower.
+    pub trustee: Address,
+    pub title_hash: BytesN<32>,
+    pub survey_doc_hash: BytesN<32>,
+    /// Surveyor's valuation in the settlement asset. Zero until valued.
+    pub usdc_value: i128,
     pub status: PropertyStatus,
-    /// Most recent independent appraisal, in units of the settlement asset.
-    /// Zero until an appraiser has published one.
-    pub valuation: i128,
-    /// Ledger timestamp of that appraisal.
-    pub valued_at: u64,
-    /// The appraiser who published it, so a stale or disputed valuation can be
-    /// traced back to the party that signed it.
-    pub appraiser: Option<Address>,
+    /// The oracle that verified the title, for traceability.
+    pub verified_by: Option<Address>,
+    /// The oracle that published the valuation.
+    pub valued_by: Option<Address>,
+}
+
+/// One construction stage.
+///
+/// `released` is written by the MortgagePool when it pays the tranche out, so
+/// a stage can never fund twice even if the registry is called again.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Milestone {
+    pub stage: u32,
+    pub evidence_hash: BytesN<32>,
+    pub verified: bool,
+    pub released: bool,
+    /// The inspector who signed this stage off.
+    pub verified_by: Option<Address>,
 }
 
 #[contracttype]
@@ -107,13 +127,14 @@ pub enum DataKey {
     PendingAdmin,
     TimelockSecs,
     Scheduled,
-    /// The Offering contract, the only caller allowed to settle a sale.
-    Offering,
-    /// Monotonic source of property ids.
+    /// The MortgagePool, the only caller allowed to mark a stage released or
+    /// move a property into or out of `Mortgaged`.
+    MortgagePool,
     NextId,
-    Sponsor(Address),
-    Appraiser(Address),
+    Trustee(Address),
+    Oracle(Address),
     Property(u64),
+    Milestone(u64, u32),
 }
 
 /// A sensitive admin change that must wait out the timelock before it runs.
@@ -153,45 +174,42 @@ impl PropertyRegistryContract {
 
     // --- Administration ---
 
-    /// Register the Offering contract, the only caller allowed to record the
-    /// outcome of a sale. Can be set only once: rewiring it later would let the
-    /// admin point the registry at a contract that marks any property owned, so
-    /// a change goes through an upgrade and its timelock instead.
-    pub fn set_offering(env: Env, admin: Address, offering: Address) {
+    /// Register the MortgagePool, the only caller allowed to record that a
+    /// tranche was released or to move a property's status once it is financed.
+    /// Can be set only once: rewiring it later would let the admin point the
+    /// registry at a contract that marks any stage funded, so a change goes
+    /// through an upgrade and its timelock instead.
+    pub fn set_mortgage_pool(env: Env, admin: Address, pool: Address) {
         Self::extend_instance(&env);
         Self::require_admin(&env, &admin);
-        if env.storage().instance().has(&DataKey::Offering) {
+        if env.storage().instance().has(&DataKey::MortgagePool) {
             panic_with_error!(&env, Error::AlreadySet);
         }
-        env.storage().instance().set(&DataKey::Offering, &offering);
+        env.storage().instance().set(&DataKey::MortgagePool, &pool);
     }
 
-    /// Authorize or revoke a sponsor. Revocation takes effect on the next
-    /// invocation; properties the sponsor already registered keep their record,
-    /// but a revoked sponsor can no longer register or open anything new.
-    pub fn set_sponsor(env: Env, admin: Address, sponsor: Address, authorized: bool) {
+    /// Authorize or revoke a trustee — the party that submits a property and
+    /// holds it in trust. Revocation takes effect on the next invocation.
+    pub fn set_trustee(env: Env, admin: Address, trustee: Address, authorized: bool) {
         Self::extend_instance(&env);
         Self::require_admin(&env, &admin);
-        Self::set_role(&env, DataKey::Sponsor(sponsor.clone()), authorized);
+        Self::set_role(&env, DataKey::Trustee(trustee.clone()), authorized);
         env.events()
-            .publish((REGISTRY, symbol_short!("sponsor")), (sponsor, authorized));
+            .publish((REGISTRY, symbol_short!("trustee")), (trustee, authorized));
     }
 
-    /// Authorize or revoke an appraiser. An appraiser's signature is what lets
-    /// a property go on sale, so the set is deliberately small and admin-held.
-    pub fn set_appraiser(env: Env, admin: Address, appraiser: Address, authorized: bool) {
+    /// Authorize or revoke an oracle — the land registry check, the surveyor's
+    /// valuation and the milestone inspection all run through this role.
+    pub fn set_oracle(env: Env, admin: Address, oracle: Address, authorized: bool) {
         Self::extend_instance(&env);
         Self::require_admin(&env, &admin);
-        Self::set_role(&env, DataKey::Appraiser(appraiser.clone()), authorized);
-        env.events().publish(
-            (REGISTRY, symbol_short!("appraisr")),
-            (appraiser, authorized),
-        );
+        Self::set_role(&env, DataKey::Oracle(oracle.clone()), authorized);
+        env.events()
+            .publish((REGISTRY, symbol_short!("oracle")), (oracle, authorized));
     }
 
     /// Schedule an upgrade. It can execute only once the timelock set at
-    /// deployment has elapsed, and can be cancelled at any time before that, so
-    /// shareholders and the admin's other signers see the change coming.
+    /// deployment has elapsed, and can be cancelled at any time before that.
     pub fn schedule_action(env: Env, admin: Address, action: Action) {
         Self::extend_instance(&env);
         Self::require_admin(&env, &admin);
@@ -266,119 +284,221 @@ impl PropertyRegistryContract {
         env.storage().instance().remove(&DataKey::PendingAdmin);
     }
 
-    // --- Sponsor operations ---
+    // --- Trustee operations ---
 
-    /// Record a new property and return its id. The property starts in `Draft`:
-    /// it cannot be offered until an appraiser has valued it.
-    pub fn register_property(
+    /// Submit a property for title verification. Returns its id.
+    ///
+    /// The five construction stages are created here, empty, so the schedule a
+    /// mortgage is underwritten against exists before anyone lends against it.
+    pub fn submit_property(
         env: Env,
-        sponsor: Address,
-        document_hash: BytesN<32>,
-        total_shares: i128,
-        price_per_share: i128,
+        trustee: Address,
+        title_hash: BytesN<32>,
+        survey_doc_hash: BytesN<32>,
     ) -> u64 {
         Self::extend_instance(&env);
-        Self::require_sponsor(&env, &sponsor);
-        if total_shares <= 0 || total_shares > MAX_TOTAL_SHARES {
-            panic_with_error!(&env, Error::InvalidShareCount);
-        }
-        if price_per_share <= 0 {
-            panic_with_error!(&env, Error::InvalidPrice);
-        }
+        Self::require_trustee(&env, &trustee);
 
         let id: u64 = env.storage().instance().get(&DataKey::NextId).unwrap_or(1);
         env.storage().instance().set(&DataKey::NextId, &(id + 1));
 
         let property = Property {
             id,
-            sponsor: sponsor.clone(),
-            document_hash,
-            total_shares,
-            price_per_share,
-            status: PropertyStatus::Draft,
-            valuation: 0,
-            valued_at: 0,
-            appraiser: None,
+            trustee: trustee.clone(),
+            title_hash,
+            survey_doc_hash,
+            usdc_value: 0,
+            status: PropertyStatus::Pending,
+            verified_by: None,
+            valued_by: None,
         };
         Self::save(&env, &property);
+
+        for stage in 0..MILESTONE_COUNT {
+            Self::save_milestone(
+                &env,
+                id,
+                &Milestone {
+                    stage,
+                    evidence_hash: BytesN::from_array(&env, &[0u8; 32]),
+                    verified: false,
+                    released: false,
+                    verified_by: None,
+                },
+            );
+        }
+
         env.events()
-            .publish((REGISTRY, symbol_short!("register")), (id, sponsor));
+            .publish((REGISTRY, symbol_short!("submitted")), (id, trustee));
         id
     }
 
-    /// Put a valued property on sale. Only its own sponsor may do this, and
-    /// only once an appraisal exists — the raise is sized against a number
-    /// somebody independent has signed.
-    pub fn open_offering(env: Env, sponsor: Address, property_id: u64) {
+    /// Submit evidence that a construction stage is complete — photographs,
+    /// receipts, an engineer's report — as the digest of the evidence bundle.
+    ///
+    /// Only the property's own trustee may do this, and only for a stage that
+    /// has not already been signed off. Evidence may be replaced until it is
+    /// verified, so a rejected submission can be corrected.
+    pub fn submit_milestone_evidence(
+        env: Env,
+        trustee: Address,
+        property_id: u64,
+        stage: u32,
+        evidence_hash: BytesN<32>,
+    ) {
         Self::extend_instance(&env);
-        Self::require_sponsor(&env, &sponsor);
-        let mut property = Self::property_of(&env, property_id);
-        if property.sponsor != sponsor {
-            panic_with_error!(&env, Error::NotSponsor);
+        Self::require_trustee(&env, &trustee);
+        let property = Self::property_of(&env, property_id);
+        if property.trustee != trustee {
+            panic_with_error!(&env, Error::NotTrustee);
         }
-        if property.status != PropertyStatus::Draft {
-            panic_with_error!(&env, Error::WrongStatus);
-        }
-        if property.valuation <= 0 {
-            panic_with_error!(&env, Error::NotAppraised);
-        }
-        property.status = PropertyStatus::Offering;
-        Self::save(&env, &property);
-        Self::publish_status(&env, property_id, PropertyStatus::Offering);
-    }
 
-    // --- Appraiser operations ---
+        let mut milestone = Self::milestone_of(&env, property_id, stage);
+        if milestone.verified {
+            panic_with_error!(&env, Error::AlreadyVerified);
+        }
+        milestone.evidence_hash = evidence_hash.clone();
+        Self::save_milestone(&env, property_id, &milestone);
 
-    /// Publish an independent valuation. A sponsor may never value their own
-    /// property, even if the admin has granted them both roles.
-    pub fn publish_valuation(env: Env, appraiser: Address, property_id: u64, valuation: i128) {
-        Self::extend_instance(&env);
-        Self::require_appraiser(&env, &appraiser);
-        if valuation <= 0 {
-            panic_with_error!(&env, Error::InvalidValuation);
-        }
-        let mut property = Self::property_of(&env, property_id);
-        if property.sponsor == appraiser {
-            panic_with_error!(&env, Error::SelfAppraisal);
-        }
-        if property.status == PropertyStatus::Retired || property.status == PropertyStatus::Failed {
-            panic_with_error!(&env, Error::WrongStatus);
-        }
-        property.valuation = valuation;
-        property.valued_at = env.ledger().timestamp();
-        property.appraiser = Some(appraiser.clone());
-        Self::save(&env, &property);
         env.events().publish(
-            (REGISTRY, symbol_short!("valuation")),
-            (property_id, appraiser, valuation),
+            (REGISTRY, symbol_short!("evidence")),
+            (property_id, stage, evidence_hash),
         );
     }
 
-    // --- Offering callbacks ---
+    // --- Oracle operations ---
 
-    /// Record that a sale settled. Offering contract only.
-    pub fn mark_owned(env: Env, caller: Address, property_id: u64) {
-        Self::transition_from_offering(&env, caller, property_id, PropertyStatus::Owned);
-    }
-
-    /// Record that a sale missed its soft cap and was unwound. Offering
-    /// contract only.
-    pub fn mark_failed(env: Env, caller: Address, property_id: u64) {
-        Self::transition_from_offering(&env, caller, property_id, PropertyStatus::Failed);
-    }
-
-    /// Wind up an owned property once the building has been sold and
-    /// shareholders bought out off-chain. Admin only, and one-way.
-    pub fn retire_property(env: Env, admin: Address, property_id: u64) {
+    /// Confirm the title against the land registry.
+    pub fn verify_title(env: Env, oracle: Address, property_id: u64) {
         Self::extend_instance(&env);
-        Self::require_admin(&env, &admin);
+        Self::require_oracle(&env, &oracle);
         let mut property = Self::property_of(&env, property_id);
-        if property.status != PropertyStatus::Owned {
+        if property.status != PropertyStatus::Pending {
             panic_with_error!(&env, Error::WrongStatus);
         }
-        property.status = PropertyStatus::Retired;
+        // A trustee cannot wave their own title through, even if the admin has
+        // granted them both roles.
+        if property.trustee == oracle {
+            panic_with_error!(&env, Error::NotAuthorized);
+        }
+        property.status = PropertyStatus::Verified;
+        property.verified_by = Some(oracle.clone());
         Self::save(&env, &property);
-        Self::publish_status(&env, property_id, PropertyStatus::Retired);
+
+        env.events()
+            .publish((REGISTRY, symbol_short!("title")), (property_id, oracle));
+        Self::publish_status(&env, property_id, PropertyStatus::Verified);
+    }
+
+    /// Record the surveyor's valuation. The property must have a confirmed
+    /// title first — a valuation on an unverified title is worth nothing, and
+    /// the mortgage's loan-to-value is computed against this number.
+    pub fn set_valuation(env: Env, oracle: Address, property_id: u64, usdc_value: i128) {
+        Self::extend_instance(&env);
+        Self::require_oracle(&env, &oracle);
+        if usdc_value <= 0 {
+            panic_with_error!(&env, Error::InvalidValuation);
+        }
+        let mut property = Self::property_of(&env, property_id);
+        if property.trustee == oracle {
+            panic_with_error!(&env, Error::NotAuthorized);
+        }
+        // Verified or already financed; a valuation may be refreshed during the
+        // build, but never before the title is confirmed.
+        if property.status == PropertyStatus::Pending {
+            panic_with_error!(&env, Error::WrongStatus);
+        }
+        property.usdc_value = usdc_value;
+        property.valued_by = Some(oracle.clone());
+        Self::save(&env, &property);
+
+        env.events().publish(
+            (REGISTRY, symbol_short!("valuation")),
+            (property_id, oracle, usdc_value),
+        );
+    }
+
+    /// Sign off a construction stage, which is what lets the MortgagePool
+    /// release that stage's tranche.
+    ///
+    /// Stages are signed off in order. Skipping one would let a builder draw
+    /// the roofing tranche on an unfinished foundation, so an out-of-order
+    /// inspection is refused even if the evidence looks good.
+    pub fn verify_milestone(env: Env, oracle: Address, property_id: u64, stage: u32) {
+        Self::extend_instance(&env);
+        Self::require_oracle(&env, &oracle);
+        let property = Self::property_of(&env, property_id);
+        if property.trustee == oracle {
+            panic_with_error!(&env, Error::NotAuthorized);
+        }
+
+        let mut milestone = Self::milestone_of(&env, property_id, stage);
+        if milestone.verified {
+            panic_with_error!(&env, Error::AlreadyVerified);
+        }
+        // An all-zero digest is what submit_property writes, and means nothing
+        // has been submitted for this stage.
+        if milestone.evidence_hash == BytesN::from_array(&env, &[0u8; 32]) {
+            panic_with_error!(&env, Error::NoEvidence);
+        }
+        if stage > 0 && !Self::milestone_of(&env, property_id, stage - 1).verified {
+            panic_with_error!(&env, Error::OutOfOrder);
+        }
+
+        milestone.verified = true;
+        milestone.verified_by = Some(oracle.clone());
+        Self::save_milestone(&env, property_id, &milestone);
+
+        env.events().publish(
+            (REGISTRY, symbol_short!("verified")),
+            (property_id, stage, oracle),
+        );
+    }
+
+    // --- MortgagePool callbacks ---
+
+    /// Record that a stage's tranche has been paid out. MortgagePool only.
+    ///
+    /// The pool checks `verified` before paying and calls this after, so the
+    /// registry is what stops the same stage funding twice.
+    pub fn mark_released(env: Env, caller: Address, property_id: u64, stage: u32) {
+        Self::extend_instance(&env);
+        caller.require_auth();
+        Self::require_pool(&env, &caller);
+
+        let mut milestone = Self::milestone_of(&env, property_id, stage);
+        if !milestone.verified {
+            panic_with_error!(&env, Error::WrongStatus);
+        }
+        if milestone.released {
+            panic_with_error!(&env, Error::AlreadyVerified);
+        }
+        milestone.released = true;
+        Self::save_milestone(&env, property_id, &milestone);
+
+        env.events()
+            .publish((REGISTRY, symbol_short!("released")), (property_id, stage));
+    }
+
+    /// Record that a mortgage against this property has been funded.
+    /// MortgagePool only.
+    ///
+    /// The pool owns these three transitions because it is the only thing that
+    /// knows whether a loan funded, closed or defaulted. They are separate
+    /// calls rather than one taking a status, so the pool never has to name the
+    /// registry's enum and the two contracts share no types across the wire.
+    pub fn mark_mortgaged(env: Env, caller: Address, property_id: u64) {
+        Self::transition(&env, caller, property_id, PropertyStatus::Mortgaged);
+    }
+
+    /// Record that the mortgage was paid off. MortgagePool only.
+    pub fn mark_repaid(env: Env, caller: Address, property_id: u64) {
+        Self::transition(&env, caller, property_id, PropertyStatus::Repaid);
+    }
+
+    /// Record that the mortgage defaulted. MortgagePool only.
+    pub fn mark_defaulted(env: Env, caller: Address, property_id: u64) {
+        Self::transition(&env, caller, property_id, PropertyStatus::Defaulted);
     }
 
     // --- Getters ---
@@ -387,38 +507,58 @@ impl PropertyRegistryContract {
         Self::property_of(&env, property_id)
     }
 
-    pub fn get_status(env: Env, property_id: u64) -> PropertyStatus {
+    pub fn get_status_of(env: Env, property_id: u64) -> PropertyStatus {
         Self::property_of(&env, property_id).status
     }
 
-    /// The terms the Offering contract needs to run a sale, and nothing else:
-    /// `(sponsor, total_shares, price_per_share, is_offering)`.
+    pub fn get_milestone(env: Env, property_id: u64, stage: u32) -> Milestone {
+        Self::milestone_of(&env, property_id, stage)
+    }
+
+    /// What the MortgagePool needs to decide whether it may lend against a
+    /// property: `(trustee, usdc_value, is_verified)`.
     ///
-    /// Returned as plain values rather than a [`Property`] so the Offering
-    /// contract can call across without linking this contract's types into its
-    /// own wasm. Widening what it returns widens that interface, so keep it to
-    /// what a sale actually needs.
-    pub fn offering_terms(env: Env, property_id: u64) -> (Address, i128, i128, bool) {
+    /// Returned as plain values rather than a [`Property`] so the pool can call
+    /// across without linking this contract's types into its own wasm. Widening
+    /// what it returns widens that interface, so keep it to what lending needs.
+    pub fn lending_terms(env: Env, property_id: u64) -> (Address, i128, bool) {
         let property = Self::property_of(&env, property_id);
         (
-            property.sponsor,
-            property.total_shares,
-            property.price_per_share,
-            property.status == PropertyStatus::Offering,
+            property.trustee,
+            property.usdc_value,
+            property.status == PropertyStatus::Verified,
         )
     }
 
-    pub fn is_sponsor(env: Env, sponsor: Address) -> bool {
+    /// Whether a stage is signed off and not yet paid out — the single
+    /// condition the MortgagePool needs before releasing a tranche.
+    pub fn is_releasable(env: Env, property_id: u64, stage: u32) -> bool {
+        let milestone = Self::milestone_of(&env, property_id, stage);
+        milestone.verified && !milestone.released
+    }
+
+    /// How many stages have been signed off, for progress display.
+    pub fn verified_stage_count(env: Env, property_id: u64) -> u32 {
+        let mut count = 0;
+        for stage in 0..MILESTONE_COUNT {
+            if Self::milestone_of(&env, property_id, stage).verified {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    pub fn is_trustee(env: Env, trustee: Address) -> bool {
         env.storage()
             .persistent()
-            .get(&DataKey::Sponsor(sponsor))
+            .get(&DataKey::Trustee(trustee))
             .unwrap_or(false)
     }
 
-    pub fn is_appraiser(env: Env, appraiser: Address) -> bool {
+    pub fn is_oracle(env: Env, oracle: Address) -> bool {
         env.storage()
             .persistent()
-            .get(&DataKey::Appraiser(appraiser))
+            .get(&DataKey::Oracle(oracle))
             .unwrap_or(false)
     }
 
@@ -426,8 +566,8 @@ impl PropertyRegistryContract {
         env.storage().instance().get(&DataKey::Admin).unwrap()
     }
 
-    pub fn get_offering(env: Env) -> Option<Address> {
-        env.storage().instance().get(&DataKey::Offering)
+    pub fn get_mortgage_pool(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::MortgagePool)
     }
 
     pub fn get_scheduled_action(env: Env) -> Option<ScheduledAction> {
@@ -443,6 +583,10 @@ impl PropertyRegistryContract {
 
     pub fn get_next_id(env: Env) -> u64 {
         env.storage().instance().get(&DataKey::NextId).unwrap_or(1)
+    }
+
+    pub fn get_milestone_count(_env: Env) -> u32 {
+        MILESTONE_COUNT
     }
 
     // --- Internals ---
@@ -487,17 +631,47 @@ impl PropertyRegistryContract {
             .extend_ttl(&key, THRESHOLD, EXTEND_TO);
     }
 
-    fn transition_from_offering(
-        env: &Env,
-        caller: Address,
-        property_id: u64,
-        status: PropertyStatus,
-    ) {
+    fn milestone_of(env: &Env, property_id: u64, stage: u32) -> Milestone {
+        if stage >= MILESTONE_COUNT {
+            panic_with_error!(env, Error::InvalidStage);
+        }
+        let key = DataKey::Milestone(property_id, stage);
+        let milestone: Milestone = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(env, Error::UnknownProperty));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, THRESHOLD, EXTEND_TO);
+        milestone
+    }
+
+    fn save_milestone(env: &Env, property_id: u64, milestone: &Milestone) {
+        let key = DataKey::Milestone(property_id, milestone.stage);
+        env.storage().persistent().set(&key, milestone);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, THRESHOLD, EXTEND_TO);
+    }
+
+    /// The one path that moves a financed property's status, so the legal
+    /// transitions are stated in a single place.
+    fn transition(env: &Env, caller: Address, property_id: u64, status: PropertyStatus) {
         Self::extend_instance(env);
         caller.require_auth();
-        Self::require_offering(env, &caller);
+        Self::require_pool(env, &caller);
+
         let mut property = Self::property_of(env, property_id);
-        if property.status != PropertyStatus::Offering {
+        let allowed = match status {
+            PropertyStatus::Mortgaged => property.status == PropertyStatus::Verified,
+            PropertyStatus::Repaid | PropertyStatus::Defaulted => {
+                property.status == PropertyStatus::Mortgaged
+            }
+            // Pending and Verified are the registry's own to set.
+            _ => false,
+        };
+        if !allowed {
             panic_with_error!(env, Error::WrongStatus);
         }
         property.status = status;
@@ -522,35 +696,35 @@ impl PropertyRegistryContract {
         }
     }
 
-    fn require_sponsor(env: &Env, sponsor: &Address) {
-        sponsor.require_auth();
-        let key = DataKey::Sponsor(sponsor.clone());
+    fn require_trustee(env: &Env, trustee: &Address) {
+        trustee.require_auth();
+        let key = DataKey::Trustee(trustee.clone());
         if !env.storage().persistent().get(&key).unwrap_or(false) {
-            panic_with_error!(env, Error::NotSponsor);
+            panic_with_error!(env, Error::NotTrustee);
         }
         env.storage()
             .persistent()
             .extend_ttl(&key, THRESHOLD, EXTEND_TO);
     }
 
-    fn require_appraiser(env: &Env, appraiser: &Address) {
-        appraiser.require_auth();
-        let key = DataKey::Appraiser(appraiser.clone());
+    fn require_oracle(env: &Env, oracle: &Address) {
+        oracle.require_auth();
+        let key = DataKey::Oracle(oracle.clone());
         if !env.storage().persistent().get(&key).unwrap_or(false) {
-            panic_with_error!(env, Error::NotAppraiser);
+            panic_with_error!(env, Error::NotOracle);
         }
         env.storage()
             .persistent()
             .extend_ttl(&key, THRESHOLD, EXTEND_TO);
     }
 
-    fn require_offering(env: &Env, caller: &Address) {
-        let offering: Address = env
+    fn require_pool(env: &Env, caller: &Address) {
+        let pool: Address = env
             .storage()
             .instance()
-            .get(&DataKey::Offering)
-            .unwrap_or_else(|| panic_with_error!(env, Error::OfferingNotSet));
-        if *caller != offering {
+            .get(&DataKey::MortgagePool)
+            .unwrap_or_else(|| panic_with_error!(env, Error::MortgagePoolNotSet));
+        if *caller != pool {
             panic_with_error!(env, Error::NotAuthorized);
         }
     }

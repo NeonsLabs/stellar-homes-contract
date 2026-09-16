@@ -1,9 +1,9 @@
 [package]
-name = "sh-share-ledger"
+name = "sh-mortgage-pool"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Per-property cap table: share balances, transfers and rental-income entitlement."
+description = "Mortgage lifecycle: application, milestone-gated disbursement, repayment and default."
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -13,3 +13,5 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+sh-property-registry = { path = "../property_registry" }
+sh-lending-pool = { path = "../lending_pool" }

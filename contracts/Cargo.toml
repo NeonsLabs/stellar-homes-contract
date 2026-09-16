@@ -2,9 +2,8 @@
 resolver = "2"
 members = [
     "property_registry",
-    "share_ledger",
-    "offering",
-    "income_distributor",
+    "lending_pool",
+    "mortgage_pool",
 ]
 
 [workspace.dependencies]

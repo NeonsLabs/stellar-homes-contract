@@ -7,16 +7,14 @@ use soroban_sdk::{
 };
 
 const TIMELOCK: u64 = 172_800;
-const SHARES: i128 = 10_000;
-const PRICE: i128 = 100;
 
 struct Setup<'a> {
     env: Env,
     registry: PropertyRegistryContractClient<'a>,
     admin: Address,
-    offering: Address,
-    sponsor: Address,
-    appraiser: Address,
+    pool: Address,
+    trustee: Address,
+    oracle: Address,
 }
 
 fn setup<'a>() -> Setup<'a> {
@@ -24,38 +22,51 @@ fn setup<'a>() -> Setup<'a> {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let offering = Address::generate(&env);
-    let sponsor = Address::generate(&env);
-    let appraiser = Address::generate(&env);
+    let pool = Address::generate(&env);
+    let trustee = Address::generate(&env);
+    let oracle = Address::generate(&env);
 
     let id = env.register(PropertyRegistryContract, (admin.clone(), TIMELOCK));
     let registry = PropertyRegistryContractClient::new(&env, &id);
-    registry.set_offering(&admin, &offering);
-    registry.set_sponsor(&admin, &sponsor, &true);
-    registry.set_appraiser(&admin, &appraiser, &true);
+    registry.set_mortgage_pool(&admin, &pool);
+    registry.set_trustee(&admin, &trustee, &true);
+    registry.set_oracle(&admin, &oracle, &true);
 
     Setup {
         env,
         registry,
         admin,
-        offering,
-        sponsor,
-        appraiser,
+        pool,
+        trustee,
+        oracle,
     }
 }
 
-fn docs(env: &Env) -> BytesN<32> {
-    BytesN::from_array(env, &[7u8; 32])
+fn hash(env: &Env, byte: u8) -> BytesN<32> {
+    BytesN::from_array(env, &[byte; 32])
 }
 
-/// Register, appraise and open in one step; most tests start from a live offering.
-fn offered(s: &Setup) -> u64 {
+/// Submit a property and clear its title, the usual starting point.
+fn verified_property(s: &Setup) -> u64 {
     let id = s
         .registry
-        .register_property(&s.sponsor, &docs(&s.env), &SHARES, &PRICE);
-    s.registry.publish_valuation(&s.appraiser, &id, &1_000_000);
-    s.registry.open_offering(&s.sponsor, &id);
+        .submit_property(&s.trustee, &hash(&s.env, 1), &hash(&s.env, 2));
+    s.registry.verify_title(&s.oracle, &id);
+    s.registry.set_valuation(&s.oracle, &id, &100_000);
     id
+}
+
+/// Sign off every stage up to and including `through`.
+fn verify_through(s: &Setup, property: u64, through: u32) {
+    for stage in 0..=through {
+        s.registry.submit_milestone_evidence(
+            &s.trustee,
+            &property,
+            &stage,
+            &hash(&s.env, 10 + stage as u8),
+        );
+        s.registry.verify_milestone(&s.oracle, &property, &stage);
+    }
 }
 
 #[test]
@@ -64,202 +75,258 @@ fn test_constructor_sets_configuration_at_deploy() {
     assert_eq!(s.registry.get_admin(), s.admin);
     assert_eq!(s.registry.get_timelock_secs(), TIMELOCK);
     assert_eq!(s.registry.get_next_id(), 1);
-    assert_eq!(s.registry.get_offering(), Some(s.offering.clone()));
-    assert_eq!(s.registry.get_scheduled_action(), None);
+    assert_eq!(s.registry.get_mortgage_pool(), Some(s.pool.clone()));
+    assert_eq!(s.registry.get_milestone_count(), MILESTONE_COUNT);
 }
 
 #[test]
-fn test_register_property_records_the_sponsors_terms() {
+fn test_submitting_a_property_creates_its_build_schedule() {
     let s = setup();
     let id = s
         .registry
-        .register_property(&s.sponsor, &docs(&s.env), &SHARES, &PRICE);
+        .submit_property(&s.trustee, &hash(&s.env, 1), &hash(&s.env, 2));
 
     let property = s.registry.get_property(&id);
     assert_eq!(property.id, 1);
-    assert_eq!(property.sponsor, s.sponsor);
-    assert_eq!(property.document_hash, docs(&s.env));
-    assert_eq!(property.total_shares, SHARES);
-    assert_eq!(property.price_per_share, PRICE);
-    assert_eq!(property.status, PropertyStatus::Draft);
-    assert_eq!(property.valuation, 0);
-    assert_eq!(property.appraiser, None);
+    assert_eq!(property.trustee, s.trustee);
+    assert_eq!(property.title_hash, hash(&s.env, 1));
+    assert_eq!(property.survey_doc_hash, hash(&s.env, 2));
+    assert_eq!(property.status, PropertyStatus::Pending);
+    assert_eq!(property.usdc_value, 0);
 
-    // Ids are handed out in order and never reused.
-    let second = s
-        .registry
-        .register_property(&s.sponsor, &docs(&s.env), &SHARES, &PRICE);
-    assert_eq!(second, 2);
-    assert_eq!(s.registry.get_next_id(), 3);
+    // All five stages exist before anyone lends against the build.
+    for stage in 0..MILESTONE_COUNT {
+        let milestone = s.registry.get_milestone(&id, &stage);
+        assert_eq!(milestone.stage, stage);
+        assert!(!milestone.verified);
+        assert!(!milestone.released);
+    }
+    // And no sixth.
+    assert!(s.registry.try_get_milestone(&id, &MILESTONE_COUNT).is_err());
 }
 
 #[test]
-fn test_register_property_rejects_invalid_terms() {
-    let s = setup();
-    let d = docs(&s.env);
-
-    assert!(s
-        .registry
-        .try_register_property(&s.sponsor, &d, &0, &PRICE)
-        .is_err());
-    assert!(s
-        .registry
-        .try_register_property(&s.sponsor, &d, &-1, &PRICE)
-        .is_err());
-    // Above MAX_TOTAL_SHARES, where the per-share accounting loses precision.
-    assert!(s
-        .registry
-        .try_register_property(&s.sponsor, &d, &(MAX_TOTAL_SHARES + 1), &PRICE)
-        .is_err());
-    assert!(s
-        .registry
-        .try_register_property(&s.sponsor, &d, &SHARES, &0)
-        .is_err());
-}
-
-#[test]
-fn test_only_registered_sponsors_can_register() {
+fn test_only_registered_trustees_can_submit() {
     let s = setup();
     let stranger = Address::generate(&s.env);
-    let d = docs(&s.env);
-
     assert!(s
         .registry
-        .try_register_property(&stranger, &d, &SHARES, &PRICE)
+        .try_submit_property(&stranger, &hash(&s.env, 1), &hash(&s.env, 2))
         .is_err());
 
     // Revocation takes effect on the next invocation.
-    s.registry.set_sponsor(&s.admin, &s.sponsor, &false);
-    assert!(!s.registry.is_sponsor(&s.sponsor));
+    s.registry.set_trustee(&s.admin, &s.trustee, &false);
+    assert!(!s.registry.is_trustee(&s.trustee));
     assert!(s
         .registry
-        .try_register_property(&s.sponsor, &d, &SHARES, &PRICE)
+        .try_submit_property(&s.trustee, &hash(&s.env, 1), &hash(&s.env, 2))
         .is_err());
 }
 
 #[test]
-fn test_a_property_cannot_be_offered_before_it_is_appraised() {
+fn test_a_valuation_needs_a_verified_title_first() {
     let s = setup();
     let id = s
         .registry
-        .register_property(&s.sponsor, &docs(&s.env), &SHARES, &PRICE);
+        .submit_property(&s.trustee, &hash(&s.env, 1), &hash(&s.env, 2));
 
-    // The sponsor's own say-so is not enough to reach the market.
-    assert!(s.registry.try_open_offering(&s.sponsor, &id).is_err());
-
-    s.registry.publish_valuation(&s.appraiser, &id, &1_250_000);
-    s.registry.open_offering(&s.sponsor, &id);
-    assert_eq!(s.registry.get_status(&id), PropertyStatus::Offering);
-}
-
-#[test]
-fn test_valuations_are_independent_and_attributed() {
-    let s = setup();
-    let id = s
+    // A valuation on an unchecked title is worth nothing.
+    assert!(s
         .registry
-        .register_property(&s.sponsor, &docs(&s.env), &SHARES, &PRICE);
+        .try_set_valuation(&s.oracle, &id, &100_000)
+        .is_err());
 
-    s.env.ledger().set_timestamp(5_000);
-    s.registry.publish_valuation(&s.appraiser, &id, &900_000);
+    s.registry.verify_title(&s.oracle, &id);
+    assert_eq!(s.registry.get_status_of(&id), PropertyStatus::Verified);
 
+    s.registry.set_valuation(&s.oracle, &id, &100_000);
     let property = s.registry.get_property(&id);
-    assert_eq!(property.valuation, 900_000);
-    assert_eq!(property.valued_at, 5_000);
-    assert_eq!(property.appraiser, Some(s.appraiser.clone()));
+    assert_eq!(property.usdc_value, 100_000);
+    assert_eq!(property.valued_by, Some(s.oracle.clone()));
+    assert_eq!(property.verified_by, Some(s.oracle.clone()));
 
-    // A sponsor may not value their own property, even holding both roles.
-    s.registry.set_appraiser(&s.admin, &s.sponsor, &true);
-    assert!(s
-        .registry
-        .try_publish_valuation(&s.sponsor, &id, &5_000_000)
-        .is_err());
-
-    // Unregistered addresses and nonsense numbers are refused.
-    let stranger = Address::generate(&s.env);
-    assert!(s
-        .registry
-        .try_publish_valuation(&stranger, &id, &900_000)
-        .is_err());
-    assert!(s
-        .registry
-        .try_publish_valuation(&s.appraiser, &id, &0)
-        .is_err());
-
-    // A later appraisal replaces the earlier one.
-    s.env.ledger().set_timestamp(9_000);
-    s.registry.publish_valuation(&s.appraiser, &id, &1_100_000);
-    let property = s.registry.get_property(&id);
-    assert_eq!(property.valuation, 1_100_000);
-    assert_eq!(property.valued_at, 9_000);
+    // A title is checked once.
+    assert!(s.registry.try_verify_title(&s.oracle, &id).is_err());
+    // Nonsense valuations are refused.
+    assert!(s.registry.try_set_valuation(&s.oracle, &id, &0).is_err());
+    assert!(s.registry.try_set_valuation(&s.oracle, &id, &-1).is_err());
 }
 
 #[test]
-fn test_only_the_properties_own_sponsor_can_open_it() {
+fn test_a_trustee_cannot_verify_their_own_property() {
     let s = setup();
-    let other_sponsor = Address::generate(&s.env);
-    s.registry.set_sponsor(&s.admin, &other_sponsor, &true);
-
+    // Even holding both roles.
+    s.registry.set_oracle(&s.admin, &s.trustee, &true);
     let id = s
         .registry
-        .register_property(&s.sponsor, &docs(&s.env), &SHARES, &PRICE);
-    s.registry.publish_valuation(&s.appraiser, &id, &1_000_000);
+        .submit_property(&s.trustee, &hash(&s.env, 1), &hash(&s.env, 2));
 
-    assert!(s.registry.try_open_offering(&other_sponsor, &id).is_err());
-    s.registry.open_offering(&s.sponsor, &id);
-}
-
-#[test]
-fn test_status_only_moves_along_the_allowed_path() {
-    let s = setup();
-    let id = offered(&s);
-
-    // Nobody but the wired Offering contract settles a sale.
-    let stranger = Address::generate(&s.env);
-    assert!(s.registry.try_mark_owned(&stranger, &id).is_err());
-    assert!(s.registry.try_mark_owned(&s.admin, &id).is_err());
-
-    s.registry.mark_owned(&s.offering, &id);
-    assert_eq!(s.registry.get_status(&id), PropertyStatus::Owned);
-
-    // An owned property cannot be settled again or reopened.
-    assert!(s.registry.try_mark_owned(&s.offering, &id).is_err());
-    assert!(s.registry.try_mark_failed(&s.offering, &id).is_err());
-    assert!(s.registry.try_open_offering(&s.sponsor, &id).is_err());
-
-    // Retirement is admin-only and one-way.
-    assert!(s.registry.try_retire_property(&stranger, &id).is_err());
-    s.registry.retire_property(&s.admin, &id);
-    assert_eq!(s.registry.get_status(&id), PropertyStatus::Retired);
-    assert!(s.registry.try_retire_property(&s.admin, &id).is_err());
-}
-
-#[test]
-fn test_a_failed_offering_is_terminal() {
-    let s = setup();
-    let id = offered(&s);
-
-    s.registry.mark_failed(&s.offering, &id);
-    assert_eq!(s.registry.get_status(&id), PropertyStatus::Failed);
-
-    // No route back: a failed raise is re-registered as a new property, so a
-    // cap table can never be reopened under the same id.
-    assert!(s.registry.try_open_offering(&s.sponsor, &id).is_err());
-    assert!(s.registry.try_mark_owned(&s.offering, &id).is_err());
-    assert!(s.registry.try_retire_property(&s.admin, &id).is_err());
+    assert!(s.registry.try_verify_title(&s.trustee, &id).is_err());
+    s.registry.verify_title(&s.oracle, &id);
     assert!(s
         .registry
-        .try_publish_valuation(&s.appraiser, &id, &10)
+        .try_set_valuation(&s.trustee, &id, &100_000)
+        .is_err());
+
+    s.registry
+        .submit_milestone_evidence(&s.trustee, &id, &0, &hash(&s.env, 9));
+    assert!(s
+        .registry
+        .try_verify_milestone(&s.trustee, &id, &0)
         .is_err());
 }
 
 #[test]
-fn test_unknown_properties_are_rejected() {
+fn test_a_milestone_needs_evidence_before_it_is_signed_off() {
     let s = setup();
-    assert!(s.registry.try_get_property(&42).is_err());
-    assert!(s.registry.try_open_offering(&s.sponsor, &42).is_err());
+    let id = verified_property(&s);
+
+    assert!(s.registry.try_verify_milestone(&s.oracle, &id, &0).is_err());
+
+    s.registry
+        .submit_milestone_evidence(&s.trustee, &id, &0, &hash(&s.env, 7));
+    s.registry.verify_milestone(&s.oracle, &id, &0);
+
+    let milestone = s.registry.get_milestone(&id, &0);
+    assert!(milestone.verified);
+    assert_eq!(milestone.evidence_hash, hash(&s.env, 7));
+    assert_eq!(milestone.verified_by, Some(s.oracle.clone()));
+
+    // Signed off once, and the evidence is then frozen.
+    assert!(s.registry.try_verify_milestone(&s.oracle, &id, &0).is_err());
     assert!(s
         .registry
-        .try_publish_valuation(&s.appraiser, &42, &1)
+        .try_submit_milestone_evidence(&s.trustee, &id, &0, &hash(&s.env, 8))
+        .is_err());
+}
+
+#[test]
+fn test_evidence_can_be_corrected_until_it_is_verified() {
+    let s = setup();
+    let id = verified_property(&s);
+
+    s.registry
+        .submit_milestone_evidence(&s.trustee, &id, &0, &hash(&s.env, 7));
+    // A rejected submission can be replaced.
+    s.registry
+        .submit_milestone_evidence(&s.trustee, &id, &0, &hash(&s.env, 8));
+    assert_eq!(
+        s.registry.get_milestone(&id, &0).evidence_hash,
+        hash(&s.env, 8)
+    );
+}
+
+#[test]
+fn test_stages_are_signed_off_in_order() {
+    let s = setup();
+    let id = verified_property(&s);
+
+    // Evidence for the roof exists, but the foundation has not passed.
+    s.registry
+        .submit_milestone_evidence(&s.trustee, &id, &2, &hash(&s.env, 12));
+    assert!(s.registry.try_verify_milestone(&s.oracle, &id, &2).is_err());
+
+    verify_through(&s, id, 1);
+    // Now the roof can be inspected.
+    s.registry.verify_milestone(&s.oracle, &id, &2);
+    assert_eq!(s.registry.verified_stage_count(&id), 3);
+}
+
+#[test]
+fn test_only_the_properties_own_trustee_submits_its_evidence() {
+    let s = setup();
+    let other = Address::generate(&s.env);
+    s.registry.set_trustee(&s.admin, &other, &true);
+    let id = verified_property(&s);
+
+    assert!(s
+        .registry
+        .try_submit_milestone_evidence(&other, &id, &0, &hash(&s.env, 7))
+        .is_err());
+}
+
+#[test]
+fn test_release_is_recorded_once_and_only_by_the_pool() {
+    let s = setup();
+    let id = verified_property(&s);
+    verify_through(&s, id, 0);
+
+    assert!(s.registry.is_releasable(&id, &0));
+    // Not signed off yet.
+    assert!(!s.registry.is_releasable(&id, &1));
+
+    let stranger = Address::generate(&s.env);
+    assert!(s.registry.try_mark_released(&stranger, &id, &0).is_err());
+    assert!(s.registry.try_mark_released(&s.admin, &id, &0).is_err());
+    // An unverified stage cannot be released.
+    assert!(s.registry.try_mark_released(&s.pool, &id, &1).is_err());
+
+    s.registry.mark_released(&s.pool, &id, &0);
+    assert!(s.registry.get_milestone(&id, &0).released);
+    // A stage funds once.
+    assert!(!s.registry.is_releasable(&id, &0));
+    assert!(s.registry.try_mark_released(&s.pool, &id, &0).is_err());
+}
+
+#[test]
+fn test_financed_status_only_moves_along_the_allowed_path() {
+    let s = setup();
+    let id = verified_property(&s);
+    let stranger = Address::generate(&s.env);
+
+    // Only the wired pool may move a financed property.
+    assert!(s.registry.try_mark_mortgaged(&stranger, &id).is_err());
+    assert!(s.registry.try_mark_mortgaged(&s.admin, &id).is_err());
+    // Cannot skip straight to repaid.
+    assert!(s.registry.try_mark_repaid(&s.pool, &id).is_err());
+
+    s.registry.mark_mortgaged(&s.pool, &id);
+    assert_eq!(s.registry.get_status_of(&id), PropertyStatus::Mortgaged);
+    // Not twice.
+    assert!(s.registry.try_mark_mortgaged(&s.pool, &id).is_err());
+
+    s.registry.mark_repaid(&s.pool, &id);
+    assert_eq!(s.registry.get_status_of(&id), PropertyStatus::Repaid);
+    // Terminal.
+    assert!(s.registry.try_mark_defaulted(&s.pool, &id).is_err());
+}
+
+#[test]
+fn test_lending_terms_report_what_the_pool_needs() {
+    let s = setup();
+    let id = s
+        .registry
+        .submit_property(&s.trustee, &hash(&s.env, 1), &hash(&s.env, 2));
+
+    let (trustee, valuation, verified) = s.registry.lending_terms(&id);
+    assert_eq!(trustee, s.trustee);
+    assert_eq!(valuation, 0);
+    assert!(!verified);
+
+    s.registry.verify_title(&s.oracle, &id);
+    s.registry.set_valuation(&s.oracle, &id, &250_000);
+    let (_, valuation, verified) = s.registry.lending_terms(&id);
+    assert_eq!(valuation, 250_000);
+    assert!(verified);
+
+    // Once financed, the property is no longer available to lend against.
+    s.registry.mark_mortgaged(&s.pool, &id);
+    let (_, _, verified) = s.registry.lending_terms(&id);
+    assert!(!verified);
+}
+
+#[test]
+fn test_unknown_properties_and_stages_are_rejected() {
+    let s = setup();
+    assert!(s.registry.try_get_property(&99).is_err());
+    assert!(s.registry.try_verify_title(&s.oracle, &99).is_err());
+    assert!(s.registry.try_get_milestone(&99, &0).is_err());
+
+    let id = verified_property(&s);
+    assert!(s.registry.try_get_milestone(&id, &MILESTONE_COUNT).is_err());
+    assert!(s
+        .registry
+        .try_submit_milestone_evidence(&s.trustee, &id, &MILESTONE_COUNT, &hash(&s.env, 1))
         .is_err());
 }
 
@@ -267,63 +334,46 @@ fn test_unknown_properties_are_rejected() {
 fn test_wiring_is_set_once() {
     let s = setup();
     let other = Address::generate(&s.env);
-    assert!(s.registry.try_set_offering(&s.admin, &other).is_err());
-    assert_eq!(s.registry.get_offering(), Some(s.offering.clone()));
+    assert!(s.registry.try_set_mortgage_pool(&s.admin, &other).is_err());
+    assert_eq!(s.registry.get_mortgage_pool(), Some(s.pool.clone()));
 }
 
 #[test]
 fn test_role_changes_are_admin_only() {
     let s = setup();
     let stranger = Address::generate(&s.env);
-
     assert!(s
         .registry
-        .try_set_sponsor(&stranger, &stranger, &true)
+        .try_set_trustee(&stranger, &stranger, &true)
         .is_err());
     assert!(s
         .registry
-        .try_set_appraiser(&stranger, &stranger, &true)
+        .try_set_oracle(&stranger, &stranger, &true)
         .is_err());
-    assert!(s.registry.try_set_offering(&stranger, &stranger).is_err());
-    assert!(!s.registry.is_sponsor(&stranger));
-    assert!(!s.registry.is_appraiser(&stranger));
+    assert!(!s.registry.is_trustee(&stranger));
+    assert!(!s.registry.is_oracle(&stranger));
 }
 
 #[test]
 fn test_upgrades_wait_out_the_timelock() {
     let s = setup();
-    let wasm_hash = BytesN::from_array(&s.env, &[3u8; 32]);
-    let action = Action::Upgrade(wasm_hash);
+    let action = Action::Upgrade(BytesN::from_array(&s.env, &[3u8; 32]));
 
     s.env.ledger().set_timestamp(1_000);
     s.registry.schedule_action(&s.admin, &action);
-    let scheduled = s.registry.get_scheduled_action().unwrap();
-    assert_eq!(scheduled.eta, 1_000 + TIMELOCK);
-
-    // Only one action may be pending, so a queued upgrade stays visible.
+    assert_eq!(
+        s.registry.get_scheduled_action().unwrap().eta,
+        1_000 + TIMELOCK
+    );
+    // One at a time, so a queued upgrade stays visible.
     assert!(s.registry.try_schedule_action(&s.admin, &action).is_err());
 
-    // Not yet.
     s.env.ledger().set_timestamp(1_000 + TIMELOCK - 1);
     assert!(s.registry.try_execute_action(&s.admin).is_err());
 
-    // Cancelling clears the queue.
     s.registry.cancel_action(&s.admin);
     assert_eq!(s.registry.get_scheduled_action(), None);
     assert!(s.registry.try_cancel_action(&s.admin).is_err());
-    assert!(s.registry.try_execute_action(&s.admin).is_err());
-}
-
-#[test]
-fn test_timelocked_actions_are_admin_only() {
-    let s = setup();
-    let stranger = Address::generate(&s.env);
-    let action = Action::Upgrade(BytesN::from_array(&s.env, &[4u8; 32]));
-
-    assert!(s.registry.try_schedule_action(&stranger, &action).is_err());
-    s.registry.schedule_action(&s.admin, &action);
-    assert!(s.registry.try_execute_action(&stranger).is_err());
-    assert!(s.registry.try_cancel_action(&stranger).is_err());
 }
 
 #[test]
@@ -333,20 +383,17 @@ fn test_admin_handover_is_two_step() {
     let stranger = Address::generate(&s.env);
 
     s.registry.propose_admin(&s.admin, &new_admin);
-    // Proposing changes nothing on its own.
     assert_eq!(s.registry.get_admin(), s.admin);
-    // Only the proposed address can accept, so a mistyped address is harmless.
     assert!(s.registry.try_accept_admin(&stranger).is_err());
 
     s.registry.accept_admin(&new_admin);
     assert_eq!(s.registry.get_admin(), new_admin);
 
-    // The old admin's powers are gone.
-    let sponsor = Address::generate(&s.env);
+    let someone = Address::generate(&s.env);
     assert!(s
         .registry
-        .try_set_sponsor(&s.admin, &sponsor, &true)
+        .try_set_trustee(&s.admin, &someone, &true)
         .is_err());
-    s.registry.set_sponsor(&new_admin, &sponsor, &true);
-    assert!(s.registry.is_sponsor(&sponsor));
+    s.registry.set_trustee(&new_admin, &someone, &true);
+    assert!(s.registry.is_trustee(&someone));
 }

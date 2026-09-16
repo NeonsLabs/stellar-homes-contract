@@ -1150,31 +1150,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "sh-income-distributor"
+name = "sh-lending-pool"
 version = "0.1.0"
 dependencies = [
- "sh-share-ledger",
  "soroban-sdk",
 ]
 
 [[package]]
-name = "sh-offering"
+name = "sh-mortgage-pool"
 version = "0.1.0"
 dependencies = [
+ "sh-lending-pool",
  "sh-property-registry",
- "sh-share-ledger",
  "soroban-sdk",
 ]
 
 [[package]]
 name = "sh-property-registry"
-version = "0.1.0"
-dependencies = [
- "soroban-sdk",
-]
-
-[[package]]
-name = "sh-share-ledger"
 version = "0.1.0"
 dependencies = [
  "soroban-sdk",
