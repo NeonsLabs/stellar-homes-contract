@@ -69,7 +69,7 @@ jobs:
         with:
           workspaces: contracts
       - run: cargo build --manifest-path $MANIFEST --target wasm32v1-none --release --locked
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: contract-wasm
           path: contracts/target/wasm32v1-none/release/*.wasm
@@ -138,7 +138,7 @@ jobs:
         run: >-
           cargo llvm-cov --manifest-path $MANIFEST --locked
           --lcov --output-path lcov.info --fail-under-lines 80
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: lcov.info
