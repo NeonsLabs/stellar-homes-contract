@@ -1,0 +1,15 @@
+[package]
+name = "sh-property-registry"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Registry of tokenized properties, their sponsors, appraisals and lifecycle status."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

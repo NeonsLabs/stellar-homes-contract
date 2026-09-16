@@ -1,0 +1,28 @@
+# Rust / Soroban
+target/
+contracts/target/
+*.wasm
+**/*.rs.bk
+
+# Environment
+.env
+.env.local
+.env.*.local
+.contracts-*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Agent tooling
+.agents
+.codex
+
+# Script dependencies
+node_modules/
