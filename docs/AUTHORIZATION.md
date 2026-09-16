@@ -1,106 +1,99 @@
 # Authorization
 
 Who may call what, and what each caller can reach. Every entry point is listed;
-if a call is not here, it is a getter and open to anyone.
+anything not here is a getter and open to anyone.
 
 ## Roles
 
-| Role | How it is held | How it is granted | How it is revoked |
-|------|----------------|-------------------|-------------------|
+| Role | How it is held | Granted by | Revoked by |
+|------|----------------|-----------|-----------|
 | Admin | One address per contract, set at deploy | Two-step handover | Handing it on; it cannot be renounced |
-| Sponsor | Flag in the registry, per address | `set_sponsor(.., true)` | `set_sponsor(.., false)`, effective on the next call |
-| Appraiser | Flag in the registry, per address | `set_appraiser(.., true)` | `set_appraiser(.., false)`, effective on the next call |
-| Investor / holder | Any wallet | — | — |
-| Offering contract | Address stored once in the registry and the ledger | `set_offering`, once | Only by upgrade |
-| IncomeDistributor | Address stored once in the ledger | `set_distributor`, once | Only by upgrade |
+| Trustee | Flag in the registry | `set_trustee(.., true)` | `set_trustee(.., false)`, effective next call |
+| Oracle | Flag in the registry | `set_oracle(.., true)` | `set_oracle(.., false)`, effective next call |
+| Underwriter | Flag in the mortgage pool | `set_underwriter(.., true)` | `set_underwriter(.., false)`, effective next call |
+| Borrower / investor | Any wallet | — | — |
+| MortgagePool | Address stored once in the registry and the lending pool | `set_mortgage_pool`, once | Only by upgrade |
 
-A revoked sponsor keeps the properties they already registered — the record
-stands — but cannot register or open anything new. Revocation does not claw back
-a settled raise.
+Revocation is forward-looking. A revoked trustee keeps the properties they
+already registered and any tranche already paid; they simply cannot submit or
+draw anything new.
 
 ## PropertyRegistry
 
 | Call | Who | Notes |
 |------|-----|-------|
-| `set_offering` | Admin | Once only |
-| `set_sponsor`, `set_appraiser` | Admin | Reversible |
-| `schedule_action`, `execute_action`, `cancel_action` | Admin | Upgrade only, behind the timelock |
+| `set_mortgage_pool` | Admin | Once only |
+| `set_trustee`, `set_oracle` | Admin | Reversible |
+| `schedule_action` / `execute_action` / `cancel_action` | Admin | Upgrade only, behind the timelock |
 | `propose_admin` | Admin | Changes nothing on its own |
 | `accept_admin` | The proposed address | Signs for itself |
-| `register_property` | Registered sponsor | Starts in `Draft` |
-| `open_offering` | The property's **own** sponsor | Requires a published valuation |
-| `publish_valuation` | Registered appraiser | **Never** the property's sponsor, even holding both roles |
-| `mark_owned`, `mark_failed` | The wired Offering contract | Only from `Offering` status |
-| `retire_property` | Admin | Only from `Owned`; one-way |
+| `submit_property` | Registered trustee | Creates the five build stages |
+| `submit_milestone_evidence` | The property's **own** trustee | Replaceable until the stage is signed off |
+| `verify_title` | Registered oracle, **never** the property's trustee | Pending → Verified |
+| `set_valuation` | Registered oracle, **never** the property's trustee | Requires a verified title; may be refreshed |
+| `verify_milestone` | Registered oracle, **never** the property's trustee | Needs evidence, and the previous stage signed off |
+| `mark_released` | The wired MortgagePool | Only for a verified, unreleased stage |
+| `mark_mortgaged` / `mark_repaid` / `mark_defaulted` | The wired MortgagePool | Each only from the one status that permits it |
 
-The sponsor check on `open_offering` is not just "is a sponsor" but "is *this*
-property's sponsor". One registered sponsor cannot open another's property.
+The trustee checks are against the **property's own trustee**, not merely "is a
+trustee". One registered trustee cannot submit evidence for another's property,
+and granting one address both the trustee and oracle roles does not let it
+verify its own work — that is checked against the property record, not the role
+flag.
 
-## ShareLedger
+Stages are verified in order. Skipping one would let a builder draw the roofing
+tranche on an unfinished foundation.
 
-| Call | Who | Notes |
-|------|-----|-------|
-| `set_offering`, `set_distributor` | Admin | Once only, each |
-| `schedule_action`, `execute_action`, `cancel_action` | Admin | Upgrade only |
-| `propose_admin` / `accept_admin` | Admin / the proposed address | |
-| `issue` | The wired Offering contract | The only way a share comes into existence |
-| `transfer` | The holder giving up the shares | Settles both sides' income first |
-| `accrue` | The wired IncomeDistributor | Refused when nothing is issued |
-| `take_accrued` | The wired IncomeDistributor | Settles and zeroes the position, returns the amount |
-
-`take_accrued` does not itself check the holder's signature — the
-IncomeDistributor requires it in `claim` before calling. The ledger accepts the
-call because the distributor is wired, and the distributor pays only the address
-that signed.
-
-## Offering
+## LendingPool
 
 | Call | Who | Notes |
 |------|-----|-------|
-| `schedule_action`, `execute_action`, `cancel_action` | Admin | Upgrade, treasury, fee; fee capped at 10% in code |
+| `set_mortgage_pool` | Admin | Once only |
+| `schedule_action` / `execute_action` / `cancel_action` | Admin | Upgrade only |
 | `propose_admin` / `accept_admin` | Admin / the proposed address | |
-| `open` | The property's own sponsor | Registry must have it in `Offering` status; one sale per property, ever |
-| `subscribe` | Any investor | Before the deadline, up to the total on offer |
-| `withdraw_subscription` | The subscriber | Before the deadline only |
-| `close` | **Anyone** | Outcome fixed by the sale's state |
-| `claim_shares` | Anyone, for a named investor | Pays only that investor; settled sales only |
-| `refund` | Anyone, for a named investor | Pays only that investor; failed sales only |
+| `deposit` | Any investor | A claim on the pool, issued one-for-one |
+| `withdraw` | The investor | Only uncommitted capital |
+| `claim_interest` | The investor | Signs for themselves |
+| `reserve` / `unreserve` | The wired MortgagePool | Commitment against approved loans |
+| `disburse` | The wired MortgagePool | Only from reserved capital |
+| `repay` | The wired MortgagePool | Splits principal and interest as the pool instructs |
+| `write_off` | The wired MortgagePool | Loss falls on capital |
 
-`claim_shares` and `refund` deliberately do not require the investor's
-signature. Both deliver strictly to the address named in the call, from that
-address's own recorded subscription, so a third party can only ever pay somebody
-what they were already owed — useful for a sponsor who wants to settle out a
-raise without every investor having to transact.
-
-`close` is permissionless for the same reason it is safe: it reads the sale's
-own subscribed total against its soft cap and deadline, and does the one thing
-those imply. A sponsor cannot strand subscribers by declining to close a failed
-raise.
-
-## IncomeDistributor
+## MortgagePool
 
 | Call | Who | Notes |
 |------|-----|-------|
-| `schedule_action`, `execute_action`, `cancel_action` | Admin | Upgrade only |
+| `set_underwriter` | Admin | Reversible |
+| `schedule_action` / `execute_action` / `cancel_action` | Admin | Upgrade and grace period; a zero grace is refused |
 | `propose_admin` / `accept_admin` | Admin / the proposed address | |
-| `deposit_income` | **Anyone** | Signs for the funds being paid in |
-| `claim` | The holder | Signs for themselves |
+| `apply` | The borrower | Verified property, within 80% LTV, one live loan per property |
+| `approve` | Registered underwriter | Re-checks the valuation and commits the facility |
+| `decline` | Registered underwriter | Only before approval; frees the property |
+| `repay` | The borrower | Must cover the instalment or the full payoff |
+| `disburse` | **Anyone** | Registry decides; tranche fixed by the loan |
+| `mark_default` | **Anyone** | Only past the grace period |
 
-`deposit_income` is open on purpose. A deposit only ever gives money away to the
-people who already hold shares, so there is nothing to gain by making one and
-nothing to protect by restricting it. In practice the sponsor or managing agent
-calls it.
+`disburse` and `mark_default` are open on purpose. Neither caller can influence
+the outcome: the registry decides whether a stage is releasable and the loan
+fixes the tranche, and arrears against the grace period decide a default. Making
+them permissionless means a trustee need not wait on the platform once an
+inspector has signed, and the platform cannot keep a bad loan off the books by
+declining to act.
+
+`disburse` pays the **trustee**, never the borrower, and never the caller. The
+point of staged release is that the funds reach the build.
 
 ## What the admin cannot do
 
 Worth stating plainly, because it is the question that matters most:
 
 - Move the settlement asset out of any contract
-- Mint, burn or transfer a share
-- Alter a holder's position or their accrued income
-- Claim income on someone's behalf
-- Raise the protocol fee above 10%
-- Change the wiring between contracts
+- Mint, transfer or seize a claim on the pool
+- Alter a loan's balance, or a borrower's or investor's position
+- Release a tranche for a stage the inspector has not signed
+- Claim interest on an investor's behalf
+- Lend above 80% of valuation, or write a rate above 30%
+- Change the wiring between the contracts
 
-Everything on that list would require an upgrade, and every upgrade waits out
-the timelock in public first.
+Every item on that list would require an upgrade, and every upgrade waits out the
+timelock in public first, where `get_scheduled_action` will show it.

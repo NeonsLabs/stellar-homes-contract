@@ -51,8 +51,8 @@ constrains it, in prose. Look at `ShareLedger::accrue` or
 Every crate has its tests in `src/test.rs`, behind `#[cfg(test)]`.
 
 - **Name tests for the behaviour they pin down**, not the function they call.
-  `test_selling_shares_does_not_forfeit_income_already_earned`, not
-  `test_transfer_2`.
+  `test_interest_does_not_depend_on_how_often_it_is_charged`, not
+  `test_accrue_2`.
 - **Test the ways it should fail**, with `try_*` and `.is_err()`. A test that
   only covers the happy path has covered the easy half.
 - **Assert on money.** Where the settlement asset moves, assert the balances of
@@ -84,9 +84,9 @@ Flag these on the PR; the template has checkboxes for them.
   who can trigger it.
 - **Anything that changes who may call what.** Update
   [docs/AUTHORIZATION.md](docs/AUTHORIZATION.md) in the same PR.
-- **Anything that changes a stored type.** `Position`, `Property` and `Sale` are
-  persisted; changing their layout breaks existing entries on a deployed
-  contract unless the upgrade migrates them. See
+- **Anything that changes a stored type.** `Property`, `Milestone`, `Mortgage`
+  and `Position` are persisted; changing their layout breaks existing entries on
+  a deployed contract unless the upgrade migrates them. See
   [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#before-scheduling-an-upgrade-that-changes-stored-types).
 - **Anything that grows the wasm.** CI fails on more than 5% growth over the
   recorded baseline. If the growth is intended, update

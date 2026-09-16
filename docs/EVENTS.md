@@ -1,69 +1,70 @@
 # Events
 
-Every event the contracts publish, for indexers and dashboards. Topics are given
-as `(contract_symbol, event_symbol)`; the data column is the tuple published
-alongside.
+Every event the contracts publish, for indexers and dashboards. Topics are
+`(contract_symbol, event_symbol)`; the data column is the tuple published
+alongside. Symbols are abbreviated where Soroban's nine-character
+`symbol_short!` limit requires it.
 
 ## PropertyRegistry — topic prefix `registry`
 
 | Event | Data | When |
 |-------|------|------|
-| `register` | `(property_id: u64, sponsor: Address)` | A sponsor records a new property |
-| `sponsor` | `(sponsor: Address, authorized: bool)` | A sponsor is granted or revoked |
-| `appraisr` | `(appraiser: Address, authorized: bool)` | An appraiser is granted or revoked |
-| `valuation` | `(property_id: u64, appraiser: Address, valuation: i128)` | A valuation is published |
+| `submitted` | `(property_id: u64, trustee: Address)` | A trustee registers a property |
+| `trustee` | `(trustee: Address, authorized: bool)` | A trustee is granted or revoked |
+| `oracle` | `(oracle: Address, authorized: bool)` | An oracle is granted or revoked |
+| `title` | `(property_id: u64, oracle: Address)` | A title passes the land-registry check |
+| `valuation` | `(property_id: u64, oracle: Address, usdc_value: i128)` | A surveyor publishes a valuation |
+| `evidence` | `(property_id: u64, stage: u32, evidence_hash: BytesN<32>)` | Build evidence is submitted |
+| `verified` | `(property_id: u64, stage: u32, oracle: Address)` | A stage passes inspection |
+| `released` | `(property_id: u64, stage: u32)` | A stage's tranche has been paid |
 | `status` | `(property_id: u64, status: PropertyStatus)` | A property changes status |
 
-`status` covers every transition: to `Offering` when the sponsor opens it, to
-`Owned` or `Failed` when the Offering contract closes the sale, and to `Retired`
-when the admin winds it up.
+`valuation` fires on every republication, so the history of a property's
+appraisals is reconstructible. `status` covers Verified, Mortgaged, Repaid and
+Defaulted.
 
-## ShareLedger — topic prefix `ledger`
-
-| Event | Data | When |
-|-------|------|------|
-| `issue` | `(property: u64, to: Address, shares: i128, total_issued: i128)` | Shares are created for an investor |
-| `transfer` | `(property: u64, from: Address, to: Address, shares: i128)` | Shares change hands |
-| `accrue` | `(property: u64, amount: i128, issued: i128)` | Income is spread across a property's shares |
-| `settled` | `(property: u64, holder: Address, owed: i128)` | A holder's entitlement is drawn down |
-
-`issue` carries the running `total_issued` so an indexer can track a property's
-outstanding supply without replaying every event.
-
-`settled` fires only when the amount is non-zero, and always immediately
-precedes the matching `income`/`claim` payout in the same transaction.
-
-## Offering — topic prefix `offering`
+## LendingPool — topic prefix `pool`
 
 | Event | Data | When |
 |-------|------|------|
-| `open` | `(property: u64, sponsor: Address, min_shares: i128, deadline: u64)` | A sale opens |
-| `subscrib` | `(property: u64, investor: Address, shares: i128, cost: i128)` | An investor subscribes |
-| `unsubscr` | `(property: u64, investor: Address, shares: i128, refund: i128)` | An investor withdraws before the deadline |
-| `claimed` | `(property: u64, investor: Address, shares: i128)` | An investor takes delivery after settlement |
-| `refund` | `(property: u64, investor: Address, amount: i128)` | An investor is refunded after a failure |
-| `close` | `(property: u64, status: SaleStatus, subscribed: i128)` | A sale settles or is unwound |
+| `deposit` | `(investor: Address, amount: i128, total_capital: i128)` | Capital comes in |
+| `withdraw` | `(investor: Address, amount: i128, total_capital: i128)` | Capital goes out |
+| `interest` | `(investor: Address, amount: i128)` | An investor collects yield |
+| `reserve` | `(amount: i128, total_reserved: i128)` | A facility is committed |
+| `unreserve` | `(amount: i128, total_reserved: i128)` | A commitment is released |
+| `disburse` | `(to: Address, amount: i128, total_lent: i128)` | A tranche is paid out |
+| `repay` | `(from: Address, principal: i128, interest: i128)` | A repayment is banked |
+| `writeoff` | `(principal: i128, total_written_off: i128)` | Principal is written off |
 
-Event symbols are abbreviated to fit Soroban's nine-character `symbol_short!`
-limit: `subscrib` for subscribe, `unsubscr` for withdrawal.
+Each carries the running total it affects, so an indexer can track the pool
+without replaying every event from genesis.
 
-## IncomeDistributor — topic prefix `income`
+## MortgagePool — topic prefix `mortgage`
 
 | Event | Data | When |
 |-------|------|------|
-| `deposit` | `(property: u64, from: Address, amount: i128, total: i128)` | Rent is paid in |
-| `claim` | `(property: u64, holder: Address, owed: i128)` | A holder collects |
+| `applied` | `(id: u64, property_id: u64, borrower: Address, principal: i128)` | An application is filed |
+| `approved` | `(id: u64, underwriter: Address, principal: i128)` | Underwriting commits the facility |
+| `declined` | `(id: u64, underwriter: Address)` | An application is refused |
+| `disbursd` | `(id: u64, stage: u32, tranche: i128, trustee: Address)` | A tranche is released |
+| `repaid` | `(id: u64, amount: i128, principal: i128, interest: i128)` | A payment is applied |
+| `default` | `(id: u64, written_off: i128, undrawn: i128)` | A loan is written off |
+| `undrwrtr` | `(underwriter: Address, authorized: bool)` | An underwriter is granted or revoked |
 
-Both carry enough to reconcile without a state read: `deposit` includes the
-running total ever deposited for the property.
+`repaid` gives the split as applied, so an indexer never has to re-derive it:
+`amount` is what the borrower paid, and `principal + interest` equals it.
 
 ## Reconstructing state from events
 
-A property's outstanding supply is the latest `total_issued` from `ledger/issue`.
-A holder's balance is their `claimed` shares plus incoming `transfer`s minus
-outgoing ones. Unclaimed income for a property is the last `deposit` total minus
-the sum of `income/claim` amounts.
+A loan's balance is its disbursements minus the principal component of its
+repayments. The pool's capital is the last `deposit`/`withdraw`/`repay` total.
+A property's build progress is the set of `verified` and `released` stages.
 
-Balances and accrued income can always be read directly instead —
-`balance_of`, `accrued_of`, `total_issued` and `unclaimed` are all open getters.
-Events exist for history and notification, not because state is unreadable.
+State can always be read directly instead — `get_mortgage`, `current_balance`,
+`payoff_amount`, `amount_due`, `pool_state`, `get_milestone` and
+`claimable_interest` are all open getters. Events exist for history and
+notification, not because state is unreadable.
+
+Note that `current_balance`, `amount_due` and `payoff_amount` compute accrual
+without writing it, so they are accurate the instant they are called even if no
+transaction has touched the loan for months.

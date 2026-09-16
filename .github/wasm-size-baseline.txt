@@ -6,7 +6,6 @@
 # update the number here in the same PR and say why in the body.
 #
 # Regenerate with: make sizes
-sh_income_distributor 25881
-sh_offering 42489
-sh_property_registry 35320
-sh_share_ledger 35329
+sh_lending_pool 38246
+sh_mortgage_pool 51268
+sh_property_registry 42013

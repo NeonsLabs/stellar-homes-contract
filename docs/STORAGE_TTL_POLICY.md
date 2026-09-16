@@ -35,14 +35,19 @@ constructor — so a contract that is used at all stays live.
 
 | Contract | In instance storage |
 |----------|--------------------|
-| PropertyRegistry | Admin, PendingAdmin, TimelockSecs, Scheduled, Offering, NextId |
-| ShareLedger | Admin, PendingAdmin, TimelockSecs, Scheduled, Offering, Distributor |
-| Offering | Admin, PendingAdmin, TimelockSecs, Scheduled, Registry, ShareLedger, SettlementToken, Treasury, FeeBps |
-| IncomeDistributor | Admin, PendingAdmin, TimelockSecs, Scheduled, ShareLedger, SettlementToken |
+| PropertyRegistry | Admin, PendingAdmin, TimelockSecs, Scheduled, MortgagePool, NextId |
+| LendingPool | Admin, PendingAdmin, TimelockSecs, Scheduled, SettlementToken, MortgagePool, and every running total (TotalCapital, TotalReserved, TotalLent, TotalInterest, TotalWrittenOff, TotalShares, Acc, Carry) |
+| MortgagePool | Admin, PendingAdmin, TimelockSecs, Scheduled, Registry, LendingPool, GraceSecs, NextId |
 
 `NextId` lives in instance storage on purpose: it must never be archived, or a
-reset counter would let a new property reuse a retired property's id and inherit
-its cap table.
+reset counter would let a new property reuse a closed one's id and inherit its
+loan history.
+
+The LendingPool's running totals live there too, rather than in persistent
+storage, because they are read and written on every single call. Keeping them
+with the instance means they are renewed by the same `extend_instance` that
+keeps the contract alive, and a pool holding anybody's capital is being called
+often enough that it never lapses.
 
 ## Persistent storage
 
@@ -51,12 +56,12 @@ Everything that belongs to a particular property or person.
 | Contract | Key | Holds |
 |----------|-----|-------|
 | PropertyRegistry | `Property(u64)` | The property record |
-| PropertyRegistry | `Sponsor(Address)`, `Appraiser(Address)` | Role flags |
-| ShareLedger | `Position(u64, Address)` | Balance, reward debt, credited income |
-| ShareLedger | `Issued(u64)`, `Acc(u64)`, `Carry(u64)` | Per-property totals |
-| Offering | `Sale(u64)` | The sale record |
-| Offering | `Subscription(u64, Address)` | One investor's subscription |
-| IncomeDistributor | `Deposited(u64)`, `Claimed(u64)` | Per-property running totals |
+| PropertyRegistry | `Milestone(u64, u32)` | One construction stage |
+| PropertyRegistry | `Trustee(Address)`, `Oracle(Address)` | Role flags |
+| LendingPool | `Position(Address)` | An investor's shares, reward debt and credited interest |
+| MortgagePool | `Mortgage(u64)` | The loan record |
+| MortgagePool | `PropertyMortgage(u64)` | The live loan against a property |
+| MortgagePool | `Underwriter(Address)` | Role flag |
 
 Persistent entries are extended on **every read and every write**, so a record
 in use renews itself. Reads go through one accessor per contract that extends
@@ -68,12 +73,14 @@ path that writes a persistent entry without extending it.
 
 ## Deliberate removals
 
-A subscription that reaches zero — claimed, refunded, or fully withdrawn — is
-**removed** rather than stored as zero. There is nothing left to say about it,
-and a spent investor should not keep paying rent on an entry that says nothing.
-Reading a removed subscription returns 0, which is the same answer.
+`PropertyMortgage` is **removed** when a loan is declined, paid off or
+defaulted, not left pointing at a closed loan. It exists to answer one question
+— is there a live mortgage against this property — and once the answer is no,
+the entry has nothing to say. Removing it is also what frees the property to be
+financed again.
 
-Role flags are removed on revocation for the same reason.
+Role flags are removed on revocation for the same reason: absent and false are
+the same answer, and the absent one costs nothing to keep.
 
 ## What archival would mean
 
@@ -82,15 +89,19 @@ willing to pay the restoration fee, and it comes back with its contents intact.
 The practical consequence of letting a `Position` lapse is that its holder must
 restore it before claiming, not that their shares are gone.
 
-The entries most at risk are those belonging to a holder who buys once and never
-transacts again for four months. This is why `accrued_of` — a read-only getter a
-dashboard calls routinely — does **not** extend anything, while every path that
-touches a position does. A holder who claims even once a quarter is never
-troubled.
+The entries most at risk are an investor's `Position` where they deposit once and
+never transact again, and a `Mortgage` on a loan nobody touches for four months —
+though a borrower who pays monthly renews their own record every time.
+
+Read-only getters that a dashboard polls (`claimable_interest`, `pool_state`,
+`current_balance`) deliberately do **not** extend persistent entries: a
+dashboard refresh should not quietly spend somebody's rent. Every path that
+actually changes state does extend.
 
 ## Rules for new code
 
-1. Configuration and wiring go in instance storage; everything else persistent.
+1. Configuration, wiring and protocol-wide running totals go in instance
+   storage; anything keyed by a property, loan or person goes in persistent.
 2. Every public entry point calls `extend_instance` first.
 3. Persistent reads extend only when the entry exists.
 4. Persistent writes extend in the same helper that sets.

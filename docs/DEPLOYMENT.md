@@ -21,41 +21,40 @@ Verify the four artifacts exist before going further:
 
 ```
 contracts/target/wasm32v1-none/release/sh_property_registry.wasm
-contracts/target/wasm32v1-none/release/sh_share_ledger.wasm
-contracts/target/wasm32v1-none/release/sh_offering.wasm
-contracts/target/wasm32v1-none/release/sh_income_distributor.wasm
+contracts/target/wasm32v1-none/release/sh_lending_pool.wasm
+contracts/target/wasm32v1-none/release/sh_mortgage_pool.wasm
 ```
 
 ## Deploy
 
 ```bash
 export USDC=<settlement asset contract id>
-export SPONSOR=<first sponsor's address>
-export APPRAISER=<appraiser's address>
+export TRUSTEE=<first trustee's address>
+export ORACLE=<verification oracle's address>
+export GRACE_SECS=1209600       # 14 days
 export TIMELOCK_SECS=172800     # 48 hours
-export FEE_BPS=250              # 2.5%
 
 ./scripts/deploy.sh
 ```
 
-The script prints `REGISTRY=`, `LEDGER=`, `OFFERING=` and `INCOME=`. Save them.
+The script prints `REGISTRY=`, `LENDING=` and `MORTGAGE=`. Save them.
 
-`SPONSOR` and `APPRAISER` must differ — the registry will not let a sponsor
-value their own property, and the script refuses the configuration up front
-rather than leaving you with a property that can never be offered.
+`TRUSTEE` and `ORACLE` must differ — the registry will not let a trustee verify
+or value their own property, and the script refuses the configuration up front
+rather than leaving you with properties that can never be financed.
 
 ### Why the script must run to completion
 
-Three wiring calls can be made only once:
+Two wiring calls can be made only once:
 
 ```
-registry.set_offering(offering)
-ledger.set_offering(offering)
-ledger.set_distributor(distributor)
+registry.set_mortgage_pool(mortgage_pool)
+lending.set_mortgage_pool(mortgage_pool)
 ```
 
-They are one-shot because rewiring later would let an admin point the ledger at
-a contract that mints itself a majority of any property. The cost of that
+They are one-shot because rewiring later would let an admin point the treasury
+at a contract that pays itself, or the registry at one that marks any stage
+funded. The cost of that
 safety is that a deployment interrupted between the deploys and the wiring
 cannot be repaired — you would have to redeploy from scratch. Do not run the
 script against a flaky connection.
@@ -63,22 +62,21 @@ script against a flaky connection.
 Verify the wiring took before doing anything else:
 
 ```bash
-stellar contract invoke --id $REGISTRY --network testnet -- get_offering
-stellar contract invoke --id $LEDGER   --network testnet -- get_offering
-stellar contract invoke --id $LEDGER   --network testnet -- get_distributor
+stellar contract invoke --id $REGISTRY --network testnet -- get_mortgage_pool
+stellar contract invoke --id $LENDING  --network testnet -- get_mortgage_pool
 ```
 
 ## Choosing the timelock
 
 The timelock is fixed at deployment and cannot be changed without an upgrade —
-which is itself timelocked. It is the window in which shareholders can see a
+which is itself timelocked. It is the window in which investors can see a
 queued upgrade and act before it executes.
 
 | Network | Suggested | Reasoning |
 |---------|-----------|-----------|
 | Local | 0 | Nothing to protect; makes tests fast |
 | Testnet | 48 hours | Long enough to exercise the flow realistically |
-| Mainnet | 7 days | Long enough that a holder checking weekly sees a queued upgrade and can claim their income first |
+| Mainnet | 7 days | Long enough that an investor checking weekly sees a queued upgrade and can withdraw uncommitted capital first |
 
 Too short and the timelock is theatre. Too long and a genuine security fix waits
 while the bug is public.
@@ -97,13 +95,13 @@ This proposes on all four contracts. Nothing changes until the multisig accepts
 from its own account:
 
 ```bash
-for id in $REGISTRY $LEDGER $OFFERING $INCOME; do
+for id in $REGISTRY $LENDING $MORTGAGE; do
   stellar contract invoke --id $id --source-account <multisig> \
     --network testnet -- accept_admin --new_admin $MULTISIG
 done
 ```
 
-Confirm with `get_admin` on each of the four before retiring the old key.
+Confirm with `get_admin` on each of the three before retiring the old key.
 
 ## Smoke test
 
@@ -111,22 +109,22 @@ Confirm with `get_admin` on each of the four before retiring the old key.
 ./scripts/smoke-testnet.sh
 ```
 
-Registers a property, appraises it, sells it out, settles, pays a month of rent
-in and claims it. Every step is a real transaction; the script refuses to run
+Registers a property, verifies its title, values it, funds the pool, approves a
+mortgage, signs off the foundation, draws the tranche and takes a repayment. Every step is a real transaction; the script refuses to run
 against mainnet.
 
-## Registering more sponsors and appraisers
+## Registering more trustees, oracles and underwriters
 
 These stay changeable for the protocol's life:
 
 ```bash
 stellar contract invoke --id $REGISTRY --source-account <admin> --network testnet \
-  -- set_sponsor --admin <admin address> --sponsor <address> --authorized true
+  -- set_trustee --admin <admin address> --trustee <address> --authorized true
 ```
 
-Revocation is forward-looking. A revoked sponsor keeps the properties they
-already registered and any settled raise stands; they simply cannot register or
-open anything new.
+Revocation is forward-looking. A revoked trustee keeps the properties they
+already registered and any tranche already drawn stands; they simply cannot
+submit or draw anything new.
 
 ## Upgrading
 
@@ -136,7 +134,7 @@ Every upgrade is a three-step sequence with the timelock in the middle.
 
 ```bash
 make build
-stellar contract upload --wasm contracts/target/wasm32v1-none/release/sh_share_ledger.wasm \
+stellar contract upload --wasm contracts/target/wasm32v1-none/release/sh_lending_pool.wasm \
   --source-account <admin> --network testnet
 ```
 
@@ -145,7 +143,7 @@ Note the wasm hash it prints.
 **2. Schedule it.**
 
 ```bash
-stellar contract invoke --id $LEDGER --source-account <admin> --network testnet \
+stellar contract invoke --id $LENDING --source-account <admin> --network testnet \
   -- schedule_action --admin <admin address> \
   --action '{"Upgrade":"<wasm hash>"}'
 ```
@@ -156,7 +154,7 @@ anyone calling `get_scheduled_action`. Announce it.
 **3. Execute, after the timelock.**
 
 ```bash
-stellar contract invoke --id $LEDGER --source-account <admin> --network testnet \
+stellar contract invoke --id $LENDING --source-account <admin> --network testnet \
   -- execute_action --admin <admin address>
 ```
 
@@ -165,9 +163,9 @@ stellar contract invoke --id $LEDGER --source-account <admin> --network testnet 
 ### Before scheduling an upgrade that changes stored types
 
 The contract keeps its address and its storage across an upgrade; only the code
-is replaced. Changing the layout of a stored type — `Position`, `Property`,
-`Sale` — without a migration will make existing entries unreadable, and for
-`Position` that means a holder's shares and accrued income.
+is replaced. Changing the layout of a stored type — `Property`, `Milestone`, `Mortgage`,
+`Position` — without a migration will make existing entries unreadable, and for
+`Mortgage` that means a borrower's balance.
 
 If a stored type changes, the upgrade must either read the old layout and write
 the new one, or the new code must tolerate both. Flag it on the PR: the template
@@ -181,7 +179,7 @@ has a checkbox for exactly this.
 - [ ] The smoke test has run clean on testnet against this exact build
 - [ ] The timelock is set to a mainnet-appropriate value
 - [ ] The multisig exists, is funded, and its signers have tested `accept_admin`
-- [ ] The treasury address is correct and controlled
-- [ ] `FEE_BPS` is the intended fee
-- [ ] Sponsors and appraisers are distinct addresses, each vetted
+- [ ] `GRACE_SECS` matches what borrowers were told
+- [ ] Trustees and oracles are distinct addresses, each vetted
+- [ ] Oracle keys are in custody appropriate to what they can authorise
 - [ ] Someone other than the deployer has read the wiring output

@@ -22,10 +22,11 @@ you would like credit in the advisory, say so and tell us how to name you.
 
 **In scope** — everything under `contracts/`:
 
-- Loss or theft of escrowed subscriptions
-- Loss or theft of deposited rental income
-- Shares issued where they were not bought, or a cap table that can be corrupted
-- Income paid to the wrong party, or income that becomes unclaimable
+- Loss or theft of investor capital in the lending pool
+- A tranche released for a stage no inspector signed off, or released twice
+- A loan balance that can be inflated, forgiven or made uncomputable
+- Interest paid to the wrong party, or that becomes unclaimable
+- Capital committed to a build that can be withdrawn out from under it
 - Any way to bypass the authorization rules in
   [docs/AUTHORIZATION.md](docs/AUTHORIZATION.md)
 - Any way to bypass or shorten the upgrade timelock
@@ -37,8 +38,8 @@ you would like credit in the advisory, say so and tell us how to name you.
 - The deployment scripts in `scripts/`, which are operator tooling
 - Anything requiring the admin multisig's signers to be compromised — that is a
   stated trust assumption
-- Sponsor fraud that the protocol openly does not prevent: see the threat model
-- Off-chain systems, including the sponsor portal and investor dashboard
+- Trustee or oracle fraud that the protocol openly does not prevent: see the threat model
+- Off-chain systems, including the KYC pipeline, trustee portal and borrower dashboard
 - Gas or fee optimisation without a security consequence
 - Findings from automated scanners without a concrete exploit path
 
@@ -47,18 +48,18 @@ you would like credit in the advisory, say so and tell us how to name you.
 These are deliberate, documented in
 [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), and not vulnerabilities:
 
-- **A sponsor can abscond with settled proceeds.** The protocol escrows
-  subscriptions until a raise settles, but at settlement the money is the
-  sponsor's. Recourse is legal and off-chain. Sponsor vetting is the real
-  control.
-- **An appraiser can collude with a sponsor.** Valuations are attributed
-  on-chain and a sponsor cannot value their own property, but an inaccurate
-  independent valuation is not detectable on-chain.
+- **A trustee can take a tranche and not build.** Release in build order limits
+  the exposure to one tranche, but the protocol cannot see a building. Recourse
+  is legal and off-chain.
+- **A corrupt oracle can cause real loss.** Sign-offs are attributed on-chain
+  and a trustee cannot sign off their own work, but a dishonest inspection or
+  valuation is not detectable on-chain. Oracle vetting and key custody are the
+  real control.
 - **The admin can upgrade any contract.** Timelocked, cancellable and visible
   while queued, but an upgrade can introduce anything. The timelock is what
   makes it survivable.
-- **Rent must be deposited honestly.** The protocol splits what it is given. It
-  cannot know what was collected.
+- **Foreclosure is off-chain.** A defaulted loan is written off on-chain;
+  recovering the property is a matter for local law.
 
 ## Supported versions
 
