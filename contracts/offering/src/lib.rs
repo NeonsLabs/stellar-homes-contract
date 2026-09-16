@@ -95,6 +95,25 @@ pub struct Sale {
     pub status: SaleStatus,
 }
 
+/// The economics of a deployment, grouped so the constructor stays legible and
+/// so a deployment's fee arrangement can be reviewed as one object rather than
+/// as loose positional arguments.
+///
+/// The fields are stored separately once set, because the treasury and the fee
+/// can each be changed later — behind the timelock — while the settlement asset
+/// cannot be changed at all.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Config {
+    /// The asset subscriptions are paid in and proceeds are paid out in.
+    pub settlement_token: Address,
+    /// Where the protocol fee is sent.
+    pub treasury: Address,
+    /// The protocol fee on a settled raise, in basis points. Never above
+    /// [`MAX_FEE_BPS`].
+    pub fee_bps: u32,
+}
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -164,12 +183,10 @@ impl OfferingContract {
         admin: Address,
         registry: Address,
         share_ledger: Address,
-        settlement_token: Address,
-        treasury: Address,
-        fee_bps: u32,
+        config: Config,
         timelock_secs: u64,
     ) {
-        if fee_bps > MAX_FEE_BPS {
+        if config.fee_bps > MAX_FEE_BPS {
             panic_with_error!(&env, Error::InvalidFee);
         }
         Self::extend_instance(&env);
@@ -177,9 +194,9 @@ impl OfferingContract {
         storage.set(&DataKey::Admin, &admin);
         storage.set(&DataKey::Registry, &registry);
         storage.set(&DataKey::ShareLedger, &share_ledger);
-        storage.set(&DataKey::SettlementToken, &settlement_token);
-        storage.set(&DataKey::Treasury, &treasury);
-        storage.set(&DataKey::FeeBps, &fee_bps);
+        storage.set(&DataKey::SettlementToken, &config.settlement_token);
+        storage.set(&DataKey::Treasury, &config.treasury);
+        storage.set(&DataKey::FeeBps, &config.fee_bps);
         storage.set(&DataKey::TimelockSecs, &timelock_secs);
     }
 
