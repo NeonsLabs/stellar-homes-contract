@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  MANIFEST: contracts/Cargo.toml
+
+jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --manifest-path $MANIFEST --all -- --check
+
+  lint:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+      - run: cargo clippy --manifest-path $MANIFEST --all-targets -- -D warnings
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+      # --locked so CI fails on an out-of-date Cargo.lock rather than silently
+      # resolving different dependency versions than anyone tested against.
+      - run: cargo test --manifest-path $MANIFEST --locked
+
+  build:
+    name: Build wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # wasm32v1-none, not wasm32-unknown-unknown: recent Rust enables wasm
+          # features on the latter (reference-types) that the Soroban VM
+          # rejects, and the failure only shows up at deploy time.
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+      - run: cargo build --manifest-path $MANIFEST --target wasm32v1-none --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: contract-wasm
+          path: contracts/target/wasm32v1-none/release/*.wasm
+          if-no-files-found: error
+
+  wasm-size:
+    name: Wasm size
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: contract-wasm
+          path: wasm
+      # Tracks the deployed binary size so unexpected bloat from a new
+      # dependency or dead code is caught before merge rather than at deploy.
+      # Update .github/wasm-size-baseline.txt in the same PR when a size
+      # increase is expected.
+      - name: Check for size regressions
+        run: |
+          set -euo pipefail
+          status=0
+          while read -r name baseline; do
+            # Skip blank lines and the file's leading comment block. Combined
+            # into one case so the loop never ends on a failing test, which
+            # `set -e` would treat as the whole step failing.
+            case "$name" in ''|'#'*) continue ;; esac
+            actual=$(stat -c '%s' "wasm/$name.wasm")
+            # Allow up to 5% growth over the recorded baseline before failing.
+            limit=$((baseline * 105 / 100))
+            printf '%-28s baseline %8d  actual %8d\n' "$name" "$baseline" "$actual"
+            if [ "$actual" -gt "$limit" ]; then
+              echo "::error file=.github/wasm-size-baseline.txt::$name grew to ${actual} bytes, over the 5% budget on its ${baseline}-byte baseline. If this is expected, update the baseline in the same PR."
+              status=1
+            fi
+          done < .github/wasm-size-baseline.txt
+          exit $status
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit --file contracts/Cargo.lock
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Generate coverage and enforce the minimum
+        run: >-
+          cargo llvm-cov --manifest-path $MANIFEST --locked
+          --lcov --output-path lcov.info --fail-under-lines 80
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: lcov.info
