@@ -1,0 +1,13 @@
+# Default reviewer for everything.
+*       @NeonsLabs/maintainers
+
+# The contracts custody money and decide ownership. Changes here need a
+# reviewer who knows the authorization and accrual invariants.
+/contracts/     @NeonsLabs/maintainers
+
+# Operator tooling: a mistake here can produce an unrepairable deployment,
+# since the wiring calls are one-shot.
+/scripts/       @NeonsLabs/maintainers
+
+# CI is what enforces the rest.
+/.github/       @NeonsLabs/maintainers
