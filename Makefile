@@ -28,7 +28,17 @@ audit:
 sizes: build
 	@ls -l contracts/target/$(TARGET)/release/*.wasm | awk '{printf "%-40s %8d bytes\n", $$9, $$5}'
 
+# Rewrite the size baseline CI checks against. Run this in the same PR as any
+# change that legitimately grows a contract, and say why in the PR body.
+baseline: build
+	@{ sed -n '1,/^# Regenerate/p' .github/wasm-size-baseline.txt; \
+	   for f in contracts/target/$(TARGET)/release/*.wasm; do \
+	     printf '%s %s\n' "$$(basename $$f .wasm)" "$$(stat -c '%s' $$f)"; \
+	   done; } > .github/wasm-size-baseline.txt.new
+	@mv .github/wasm-size-baseline.txt.new .github/wasm-size-baseline.txt
+	@echo "Baseline updated:"; grep -v '^#' .github/wasm-size-baseline.txt
+
 clean:
 	cargo clean --manifest-path $(MANIFEST)
 
-.PHONY: default all build test lint fmt fmt-check audit sizes clean
+.PHONY: default all build test lint fmt fmt-check audit sizes baseline clean

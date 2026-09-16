@@ -1,0 +1,12 @@
+# Release wasm sizes, in bytes, for the size-regression check in CI.
+#
+# CI fails a PR that grows any binary by more than 5% over its baseline. That
+# budget is there to catch a dependency or a chunk of dead code arriving by
+# accident, not to forbid the contracts growing. When growth is intended,
+# update the number here in the same PR and say why in the body.
+#
+# Regenerate with: make sizes
+sh_income_distributor 25881
+sh_offering 42489
+sh_property_registry 35320
+sh_share_ledger 35329
