@@ -58,9 +58,11 @@ fn setup<'a>() -> Setup<'a> {
             admin.clone(),
             registry_id.clone(),
             ledger_id.clone(),
-            sac.address(),
-            treasury.clone(),
-            FEE_BPS,
+            Config {
+                settlement_token: sac.address(),
+                treasury: treasury.clone(),
+                fee_bps: FEE_BPS,
+            },
             TIMELOCK,
         ),
     );
