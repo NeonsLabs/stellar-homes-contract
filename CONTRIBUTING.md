@@ -22,7 +22,7 @@ Clippy runs with `-D warnings`. A warning is a failure.
 
 ## Writing the code
 
-The four contracts share one shape deliberately. New code should look like the
+The three contracts share one shape deliberately. New code should look like the
 code next to it.
 
 - **`#![no_std]` throughout.** No `std`, no allocation outside the SDK's types.
@@ -33,8 +33,9 @@ code next to it.
 - **Authorization is explicit.** `require_auth()` on the acting address, then a
   check that the address is the one allowed. Both, in that order.
 - **Amounts are `i128` and validated positive** before anything else happens.
-- **State changes before external calls.** Zero a subscription before issuing
-  against it; the ordering is what makes re-entrancy a non-issue.
+- **State changes before external calls.** Record a repayment or a tranche
+  release in storage before moving the settlement asset; the ordering is what
+  makes re-entrancy a non-issue.
 
 ### Comments
 
@@ -43,8 +44,7 @@ admin is noise. Explain the reasoning a reader could not recover from the code:
 why a value is set once, why a check exists, what would go wrong without it.
 
 Doc comments on public functions should say what the function is for and what
-constrains it, in prose. Look at `ShareLedger::accrue` or
-`Offering::close` for the register.
+constrains it, in prose. Look at `MortgagePool::repay` for the register.
 
 ## Tests
 
@@ -67,8 +67,8 @@ Coverage is enforced at 80% of lines in CI.
 Conventional commits, scoped to the crate:
 
 ```
-feat(ledger): settle both sides of a transfer before moving shares
-fix(offering): reject a withdrawal after the deadline
+feat(mortgage_pool): clear accrued interest before principal on repay
+fix(lending_pool): reject a withdrawal that would break the reserve
 docs(threat-model): explain what a rogue admin cannot reach
 ```
 
