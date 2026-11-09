@@ -12,6 +12,9 @@ feature-depth = 1
 [advisories]
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
+# Same reasoning as .cargo/audit.toml: reaches us only via soroban-env-host's
+# test runtime, never a contract wasm. Remove after the soroban-sdk upgrade.
+ignore = ["RUSTSEC-2026-0387"]
 
 [licenses]
 allow = [

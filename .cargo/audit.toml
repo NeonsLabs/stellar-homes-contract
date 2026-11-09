@@ -1,0 +1,11 @@
+# Read by `cargo audit` when it is run from the repository root, as CI does.
+[advisories]
+ignore = [
+  # crypto-bigint 0.5.5: timing variability in operations meant to be constant
+  # time. It reaches this repo only through soroban-env-host -> k256, the
+  # Soroban host's native test runtime, and is not part of any contract wasm
+  # (`cargo tree --target wasm32v1-none -e normal -i crypto-bigint` is empty).
+  # The fix needs a soroban-sdk major upgrade, which is a redeploy and is tracked
+  # separately. Remove this entry when the SDK is upgraded.
+  "RUSTSEC-2026-0387",
+]
