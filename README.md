@@ -14,6 +14,20 @@ layer that custodies capital, releases it against verified progress, and tracks
 what is owed. The KYC pipeline, the trustee portal and the borrower dashboard
 live in `stellar-homes-backend` and `stellar-homes-frontend`.
 
+## Live on testnet
+
+The three contracts are deployed and wired together on Stellar testnet, settling in Circle's testnet USDC. The addresses, the admin and the timelock are recorded in [`deployments/testnet.json`](deployments/testnet.json).
+
+| Contract | Address |
+|----------|---------|
+| PropertyRegistry | [`CBOELYHK2KJTCMAUOSW25MF2UEVEQQ5WXSSAABVZBTBT6VZZF6RFTAIE`](https://stellar.expert/explorer/testnet/contract/CBOELYHK2KJTCMAUOSW25MF2UEVEQQ5WXSSAABVZBTBT6VZZF6RFTAIE) |
+| LendingPool | [`CDKXXSKF42LNLK3PRBJM45VR32RUE5TXSCJ4FJF6CXKO4HMNV6QFLBWY`](https://stellar.expert/explorer/testnet/contract/CDKXXSKF42LNLK3PRBJM45VR32RUE5TXSCJ4FJF6CXKO4HMNV6QFLBWY) |
+| MortgagePool | [`CARXKBI6TY3ON74W5LCVQFWC4ZLEZ45ZGRZIGBUHA5FEDRV2ZCTRFE2K`](https://stellar.expert/explorer/testnet/contract/CARXKBI6TY3ON74W5LCVQFWC4ZLEZ45ZGRZIGBUHA5FEDRV2ZCTRFE2K) |
+
+One mortgage has been taken through its whole life on this deployment: a pool deposit, a registered and valued property, an application, approval, a signed-off foundation stage, a tranche released to the trustee, and repayment. Every step is a transaction you can open, listed in [`deployments/testnet-smoke-run.md`](deployments/testnet-smoke-run.md). That run released one stage and repaid straight away, so interest was zero. Instalments, arrears and default are covered by the test suites and have not been run on testnet.
+
+The contracts are unaudited, and the admin is still a single key. A live web app and API run against them: [app](https://stellar-homes-frontend-bice.vercel.app), [API](https://stellar-homes-api.onrender.com/stats).
+
 ## The Contracts
 
 | Crate | Contract | Responsibility |
