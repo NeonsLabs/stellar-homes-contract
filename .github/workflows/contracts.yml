@@ -15,4 +15,5 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - name: Cargo Test
-        run: cargo test --workspace
+        # The workspace manifest is in contracts/, not at the repository root.
+        run: cargo test --manifest-path contracts/Cargo.toml --workspace --locked
