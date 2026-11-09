@@ -15,6 +15,16 @@
 #   ORACLE       oracle identity, already registered     (default: sh-oracle)
 #   BORROWER     borrower identity, funded with USDC     (default: sh-borrower)
 #   INVESTOR     investor identity, funded with USDC     (default: sh-investor)
+#   USDC_ISSUER  issuer of the settlement asset. When set, the trustee gets a
+#                trustline first, which a tranche payout needs. Circle's testnet
+#                issuer is GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
+#   DEPOSIT      what the investor puts in the pool      (default: 100 USDC)
+#   VALUATION    the property's appraised value          (default: 100 USDC)
+#   PRINCIPAL    the loan amount; must stay within 80% of VALUATION and
+#                within DEPOSIT                          (default: 50 USDC)
+#   Amounts are in the asset's smallest unit, 7 decimals. The Circle testnet
+#   faucet gives 20 USDC at a time, so a faucet-funded run needs smaller figures:
+#   DEPOSIT=150000000 VALUATION=200000000 PRINCIPAL=100000000
 set -euo pipefail
 
 NETWORK=${NETWORK:-testnet}
@@ -48,14 +58,24 @@ TITLE=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
 SURVEY=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
 EVIDENCE=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
 
-VALUATION=1000000000   # 100 USDC at 7 decimals
-PRINCIPAL=500000000    # 50 USDC — comfortably inside the 80% ceiling
+DEPOSIT=${DEPOSIT:-1000000000}       # 100 USDC at 7 decimals
+VALUATION=${VALUATION:-1000000000}   # 100 USDC
+PRINCIPAL=${PRINCIPAL:-500000000}    # 50 USDC, comfortably inside the 80% ceiling
 TERM=120
 RATE_BPS=850
 
 echo "==> Investor funds the pool"
 call "$LENDING" "$INVESTOR" deposit \
-  --investor "$INVESTOR_ADDR" --amount 1000000000 >/dev/null
+  --investor "$INVESTOR_ADDR" --amount "$DEPOSIT" >/dev/null
+
+# A tranche is paid to the trustee, and a Stellar asset transfer to an account
+# with no trustline for it reverts. Without this the release step fails with
+# "trustline entry is missing". It is harmless if the trustline already exists.
+if [ -n "${USDC_ISSUER:-}" ]; then
+  echo "==> Trustee opens a USDC trustline"
+  stellar tx new change-trust --line "USDC:$USDC_ISSUER" \
+    --source-account "$TRUSTEE" --network "$NETWORK" >/dev/null
+fi
 
 echo "==> Trustee registers a property"
 PROPERTY=$(call "$REGISTRY" "$TRUSTEE" submit_property \
@@ -94,7 +114,9 @@ echo -n "==> Payoff amount: "
 call "$MORTGAGE" "$BORROWER" payoff_amount --mortgage_id "$LOAN"
 
 echo "==> Borrower clears the loan outright"
-PAYOFF=$(call "$MORTGAGE" "$BORROWER" payoff_amount --mortgage_id "$LOAN")
+# The CLI prints an i128 as a quoted JSON string; strip the quotes or the next
+# call cannot parse it as an amount.
+PAYOFF=$(call "$MORTGAGE" "$BORROWER" payoff_amount --mortgage_id "$LOAN" | tr -d '"')
 call "$MORTGAGE" "$BORROWER" repay --mortgage_id "$LOAN" --amount "$PAYOFF" >/dev/null
 
 echo -n "==> Property status: "
